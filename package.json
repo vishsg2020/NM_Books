@@ -1,0 +1,30 @@
+{
+  "name": "nalla-malayalam-books",
+  "version": "0.1.0",
+  "description": "Nalla Malayalam book inventory and sales management (Netlify + Supabase Postgres)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js",
+    "seed:demo": "node scripts/seed-demo.js ./data/demo-pg",
+    "backup": "node scripts/backup.js",
+    "migrate": "node scripts/migrate.js",
+    "import:orders": "node scripts/import-orders.js",
+    "catalogue:update": "node scripts/update-catalogue.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "exceljs": "^4.4.0",
+    "express": "^5.3.0",
+    "pg": "^8.23.1",
+    "serverless-http": "^4.0.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@netlify/database-dev": "^1.0.1"
+  }
+}

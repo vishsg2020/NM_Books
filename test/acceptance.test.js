@@ -1,0 +1,598 @@
+'use strict';
+// API acceptance tests for Phase 1, mapped to the BA document's business rules. Run: npm test
+process.env.TODAY_OVERRIDE = '2026-11-16';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const pg = require('pg');
+const { createDb } = require('../src/db');
+const { applyMigrations } = require('../src/migrate');
+const { createApp } = require('../src/app');
+const { hashPassword } = require('../src/auth');
+
+let server, base, db, devDb, pool;
+const pw = 'correct-horse-1';
+
+function client() {
+  let cookie = '';
+  async function call(method, url, body) {
+    const res = await fetch(base + url, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'nm-app', ...(cookie ? { Cookie: cookie } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const sc = res.headers.get('set-cookie');
+    if (sc) cookie = sc.split(';')[0];
+    const data = await res.json().catch(() => null);
+    return { status: res.status, data };
+  }
+  return {
+    send: (m, u, b) => call(m, u, b), get: u => call('GET', u), post: (u, b) => call('POST', u, b), patch: (u, b) => call('PATCH', u, b),
+    login: async email => { const r = await call('POST', '/api/login', { email, password: pw }); assert.equal(r.status, 200, JSON.stringify(r.data)); return r; },
+  };
+}
+
+// A raw call for methods the test client has no shortcut for.
+async function fetchJson(c, method, url, body) { return c.send(method, url, body); }
+const A = client(), M = client(), T = client(), O = client(), S = client(), D = client(), anon = client();
+const ids = {};
+let maam, kozh, puzha; // books
+const stock = async id => { const b = (await A.get(`/api/books/${id}`)).data; return [b.on_hand, b.reserved, b.available]; };
+const ok = (r, status = 201) => { assert.equal(r.status, status, JSON.stringify(r.data)); return r.data; };
+
+test.before(async () => {
+  const { NetlifyDB } = await import('@netlify/database-dev');
+  devDb = new NetlifyDB({ logger: () => {} });
+  pool = new pg.Pool({ connectionString: await devDb.start(), max: 1 }); // the local test database is one shared session
+  await applyMigrations(pool);
+  db = createDb(pool);
+  await db.run(`INSERT INTO users (name,email,password_hash,role) VALUES ('Asha Admin','a@x.in',?,'admin')`, [hashPassword(pw)]);
+  server = createApp(db).listen(0);
+  base = `http://127.0.0.1:${server.address().port}`;
+  await A.login('a@x.in');
+});
+test.after(async () => { server.close(); await pool.end(); await devDb.stop(); });
+
+test('unauthenticated and cross-site style requests are rejected', async () => {
+  assert.equal((await anon.get('/api/books')).status, 401);
+  assert.equal((await anon.get('/api/sales')).status, 401);
+  const r = await fetch(base + '/api/books', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  assert.equal(r.status, 403);
+  const bad = await anon.post('/api/login', { email: 'a@x.in', password: 'wrong-password' });
+  assert.equal(bad.status, 401);
+});
+
+test('Admin creates an individual login for each role; only Admin manages users', async () => {
+  for (const [role, email, c] of [['manager', 'm@x.in', M], ['telesales', 't@x.in', T], ['online', 'o@x.in', O], ['onsite', 's@x.in', S], ['dispatch', 'd@x.in', D]]) {
+    ids[role] = ok(await A.post('/api/users', { name: role + ' user', email, password: pw, role })).id;
+    await c.login(email);
+  }
+  assert.equal((await A.post('/api/users', { name: 'Dup', email: 'T@x.in', password: pw, role: 'telesales' })).status, 409);
+  assert.equal((await A.post('/api/users', { name: 'Short', email: 'z@x.in', password: 'short', role: 'telesales' })).status, 400);
+  assert.equal((await M.get('/api/users')).status, 403);
+  assert.equal((await T.post('/api/users', { name: 'X', email: 'x@x.in', password: pw, role: 'admin' })).status, 403);
+  const me = (await A.get('/api/me')).data.user;
+  assert.equal((await A.patch(`/api/users/${me.id}`, { active: false })).status, 400); // last admin / self
+  // a deactivated user is signed out at once
+  const tmp = client();
+  const tid = ok(await A.post('/api/users', { name: 'Temp', email: 'tmp@x.in', password: pw, role: 'online' })).id;
+  await tmp.login('tmp@x.in');
+  ok(await A.patch(`/api/users/${tid}`, { active: false }), 200);
+  assert.equal((await tmp.get('/api/me')).status, 401);
+});
+
+test('Book Master: Admin adds and edits books; opening stock becomes a stock movement', async () => {
+  maam = ok(await A.post('/api/books', { sku: 'NM-001', name: 'Maambazham', category: 'Series 1', price: 250, opening_stock: 100, min_stock: 20 }));
+  kozh = ok(await A.post('/api/books', { sku: 'NM-002', name: 'Kozhunnthu', category: 'Series 1', price: 300, opening_stock: 10, min_stock: 5 }));
+  puzha = ok(await A.post('/api/books', { sku: 'NM-003', name: 'Puzha', price: 150 }));
+  assert.deepEqual([maam.on_hand, maam.reserved, maam.available], [100, 0, 100]);
+  assert.deepEqual([puzha.on_hand, puzha.available], [0, 0]);
+  assert.equal((await A.post('/api/books', { sku: 'nm-001', name: 'Other', price: 10 })).status, 409);
+  assert.equal((await A.post('/api/books', { sku: 'NM-009', name: 'maambazham', price: 10 })).status, 409);
+  assert.equal((await A.post('/api/books', { sku: 'NM-010', name: 'No price' })).status, 400);
+  assert.equal((await M.post('/api/books', { sku: 'NM-011', name: 'Manager book', price: 10 })).status, 403);
+  assert.equal((await T.patch(`/api/books/${maam.id}`, { price: 1 })).status, 403);
+  const e = ok(await A.patch(`/api/books/${maam.id}`, { price: 260, on_hand: 9999 }), 200);
+  assert.equal(e.price, 260); assert.equal(e.on_hand, 100); // stock cannot be edited directly
+  const detail = (await A.get(`/api/books/${maam.id}`)).data;
+  assert.ok(detail.history.some(h => h.action === 'updated' && h.after.price === 260)); // audit trail
+  const mv = (await A.get(`/api/inventory/movements?book_id=${maam.id}`)).data.rows;
+  assert.equal(mv.length, 1); assert.equal(mv[0].type, 'Opening stock'); assert.equal(mv[0].on_hand_after, 100);
+  assert.equal((await T.get('/api/books?active=1')).data.length, 3); // every role can read the Book Master
+});
+
+test('Inventory: manual movements update stock and keep a history; stock can never go negative', async () => {
+  ok(await A.post('/api/inventory/movements', { book_id: puzha.id, type: 'Stock received', qty: 40, note: 'Print run 1' }));
+  ok(await A.post('/api/inventory/movements', { book_id: puzha.id, type: 'Damaged stock', qty: 3, note: 'Water damage' }));
+  ok(await A.post('/api/inventory/movements', { book_id: puzha.id, type: 'Stock issued', qty: 2, note: 'Review copies' }));
+  ok(await A.post('/api/inventory/movements', { book_id: puzha.id, type: 'Stock adjustment', qty: 5, direction: 'remove', note: 'Stock count' }));
+  assert.deepEqual(await stock(puzha.id), [30, 0, 30]);
+  assert.equal((await A.post('/api/inventory/movements', { book_id: puzha.id, type: 'Damaged stock', qty: 3 })).status, 400); // note required
+  assert.equal((await A.post('/api/inventory/movements', { book_id: puzha.id, type: 'Stock issued', qty: 31, note: 'x' })).status, 422);
+  assert.equal((await A.post('/api/inventory/movements', { book_id: puzha.id, type: 'Stock reserved', qty: 1 })).status, 400); // not a manual type
+  assert.equal((await M.post('/api/inventory/movements', { book_id: puzha.id, type: 'Stock received', qty: 1 })).status, 403);
+  assert.equal((await T.get('/api/inventory/movements')).status, 403);
+  assert.equal((await M.get(`/api/inventory/movements?book_id=${puzha.id}`)).data.rows.length, 4);
+  assert.deepEqual(await stock(puzha.id), [30, 0, 30]);
+});
+
+let teleSale;
+test('Tele-sales order: several books, automatic totals, customer created, stock reserved (not deducted)', async () => {
+  const body = { request_key: 'k-tele-1', customer_name: 'Lakshmi Nair', customer_phone: '+91 98470 12345', address: '12 MG Road, Kochi', location: 'Kochi',
+    items: [{ book_id: maam.id, qty: 2 }, { book_id: kozh.id, qty: 1, unit_price: 280 }], payment_method: 'UPI', amount_received: 300 };
+  teleSale = ok(await T.post('/api/sales', body));
+  assert.equal(teleSale.channel, 'Tele-sales'); assert.equal(teleSale.status, 'Confirmed');
+  assert.equal(teleSale.total_amount, 2 * 260 + 280); assert.equal(teleSale.balance, 800 - 300);
+  assert.equal(teleSale.payment_status, 'Partially Paid'); assert.equal(teleSale.payments.length, 1);
+  assert.equal(teleSale.salesperson_id, ids.telesales); assert.match(teleSale.sale_no, /^S-\d{6}$/);
+  assert.deepEqual(await stock(maam.id), [100, 2, 98]);
+  assert.deepEqual(await stock(kozh.id), [10, 1, 9]);
+  // the same form submitted twice saves once
+  const again = await T.post('/api/sales', body);
+  assert.equal(again.status, 200); assert.equal(again.data.id, teleSale.id);
+  assert.deepEqual(await stock(maam.id), [100, 2, 98]);
+  // validation
+  assert.equal((await T.post('/api/sales', { customer_name: 'No phone', address: 'x', items: [{ book_id: maam.id, qty: 1 }] })).status, 400);
+  assert.equal((await T.post('/api/sales', { customer_name: 'N', customer_phone: '9000000001', address: 'x', items: [] })).status, 400);
+  assert.equal((await T.post('/api/sales', { customer_name: 'N', customer_phone: '9000000001', address: 'x', items: [{ book_id: maam.id, qty: 1 }, { book_id: maam.id, qty: 2 }] })).status, 400);
+  assert.equal((await T.post('/api/sales', { customer_name: 'N', customer_phone: '9000000001', address: 'x', items: [{ book_id: maam.id, qty: 1 }], amount_received: 999, payment_method: 'UPI' })).status, 400);
+  assert.equal((await T.post('/api/sales', { customer_name: 'N', customer_phone: '9000000001', address: 'x', items: [{ book_id: 99999, qty: 1 }] })).status, 400);
+  assert.equal((await T.post('/api/sales', { channel: 'Online', customer_name: 'N', customer_phone: '9000000001', address: 'x', items: [{ book_id: maam.id, qty: 1 }] })).status, 403);
+  assert.equal((await D.post('/api/sales', { channel: 'Tele-sales', customer_name: 'N', customer_phone: '9000000001', address: 'x', items: [{ book_id: maam.id, qty: 1 }] })).status, 403);
+  // cannot promise more copies than are available
+  const over = await T.post('/api/sales', { customer_name: 'N', customer_phone: '9000000001', address: 'x', items: [{ book_id: kozh.id, qty: 10 }] });
+  assert.equal(over.status, 422); assert.equal(over.data.code, 'INSUFFICIENT_STOCK'); assert.equal(over.data.available, 9);
+  assert.equal((await M.get('/api/customers?q=9000000001')).data.rows.length, 0); // failed sale left nothing behind
+});
+
+test('existing customers are recognised by contact number, whatever the formatting', async () => {
+  const s2 = ok(await T.post('/api/sales', { customer_name: 'Lakshmi N', customer_phone: '09847012345', address: 'Other address', items: [{ book_id: maam.id, qty: 1 }], payment_method: 'COD' }));
+  assert.equal(s2.customer_id, teleSale.customer_id); assert.equal(s2.payment_status, 'COD');
+  ids.codSale = s2.id;
+  const list = (await M.get('/api/customers?q=98470')).data.rows;
+  assert.equal(list.length, 1);
+  const c = list[0];
+  assert.equal(c.name, 'Lakshmi Nair'); assert.match(c.code, /^C-\d{5}$/);
+  assert.equal(c.total_orders, 2); assert.equal(c.total_purchase_amount, 800 + 260); assert.equal(c.outstanding_amount, 500 + 260);
+  assert.equal(c.first_purchase_date, '2026-11-16');
+  assert.equal((await T.get('/api/customers/lookup?phone=9847012345')).data.customer.id, c.id);
+  const profile = (await M.get(`/api/customers/${c.id}`)).data;
+  assert.equal(profile.sales.length, 2); assert.equal(profile.payments.length, 1);
+  assert.equal(profile.books.find(b => b.name === 'Maambazham').qty, 3);
+  assert.equal(profile.sales[1].items.length, 2);
+  ok(await T.patch(`/api/customers/${c.id}`, { type: 'Other', location: 'Ernakulam' }), 200);
+  assert.equal((await D.get('/api/customers')).status, 403);
+});
+
+test('Online sale: platform and order ID; the same marketplace order cannot be entered twice', async () => {
+  const body = { platform: 'Amazon', platform_order_id: '402-1234567-1234567', customer_name: 'Amazon Buyer', items: [{ book_id: maam.id, qty: 1 }], payment_method: 'Other', amount_received: 260 };
+  const s = ok(await O.post('/api/sales', body));
+  assert.equal(s.channel, 'Online'); assert.equal(s.customer_id, null); assert.equal(s.payment_status, 'Paid'); assert.equal(s.status, 'Confirmed');
+  ids.onlineSale = s.id;
+  const dup = await O.post('/api/sales', body);
+  assert.equal(dup.status, 409); assert.equal(dup.data.sale_no, s.sale_no);
+  assert.equal((await O.post('/api/sales', { customer_name: 'X', items: [{ book_id: maam.id, qty: 1 }] })).status, 400); // platform required
+  assert.deepEqual(await stock(maam.id), [100, 4, 96]);
+});
+
+test('Onsite sale handed over on the spot deducts stock immediately; an onsite order reserves it', async () => {
+  const s = ok(await S.post('/api/sales', { location_type: 'School', location_name: 'St Mary\'s School', contact_person: 'Sr Anna', customer_phone: '0484 2345678',
+    items: [{ book_id: maam.id, qty: 20 }, { book_id: puzha.id, qty: 10 }], payment_method: 'Cash', amount_received: 2000, due_date: '2026-11-10', next_visit_date: '2026-12-01' }));
+  assert.equal(s.status, 'Completed'); assert.equal(s.customer_name, 'St Mary\'s School'); assert.equal(s.total_amount, 20 * 260 + 10 * 150);
+  ids.onsiteSale = s.id;
+  assert.deepEqual(await stock(maam.id), [80, 4, 76]);
+  assert.deepEqual(await stock(puzha.id), [20, 0, 20]);
+  const cust = (await M.get(`/api/customers/${s.customer_id}`)).data;
+  assert.equal(cust.type, 'School');
+  const o = ok(await S.post('/api/sales', { location_type: 'Bookstore', location_name: 'DC Books', handed_over: false, due_date: '2026-12-15', items: [{ book_id: puzha.id, qty: 5 }] }));
+  assert.equal((await S.post('/api/sales', { location_type: 'Bookstore', location_name: 'DC Books', handed_over: false, items: [{ book_id: puzha.id, qty: 1 }] })).status, 400); // a balance needs a due date
+  assert.equal(o.status, 'Confirmed'); ids.onsiteOrder = o.id;
+  assert.deepEqual(await stock(puzha.id), [20, 5, 15]);
+  assert.equal((await S.post('/api/sales', { location_name: 'X', items: [{ book_id: puzha.id, qty: 1 }] })).status, 400);
+});
+
+test('each role sees only the sales it should', async () => {
+  const count = async c => (await c.get('/api/sales')).data.rows.length;
+  assert.equal(await count(M), 5); assert.equal(await count(A), 5);
+  assert.equal(await count(T), 2); assert.equal(await count(O), 1); assert.equal(await count(S), 2);
+  assert.equal(await count(D), 4); // everything except the completed onsite sale
+  assert.equal((await T.get(`/api/sales/${ids.onlineSale}`)).status, 403);
+  assert.equal((await D.get(`/api/sales/${ids.onsiteSale}`)).status, 403);
+  assert.equal((await M.get('/api/sales?channel=Onsite')).data.rows.length, 2);
+  assert.equal((await M.get(`/api/sales?book_id=${kozh.id}`)).data.rows.length, 1);
+  assert.equal((await M.get('/api/sales?q=984701')).data.rows.length, 2);
+  assert.equal((await M.get('/api/sales?payment_status=overdue')).data.rows.length, 1);
+  const t = (await M.get('/api/sales')).data.totals;
+  assert.equal(t.amount, 800 + 260 + 260 + 6700 + 750); assert.equal(t.received, 300 + 260 + 2000);
+});
+
+test('several payments can be recorded against one order; balance and status follow', async () => {
+  let s = ok(await T.post(`/api/sales/${teleSale.id}/payments`, { amount: 200, method: 'Bank Transfer' }));
+  assert.equal(s.balance, 300); assert.equal(s.payment_status, 'Partially Paid'); assert.equal(s.payments.length, 2);
+  assert.equal((await T.post(`/api/sales/${teleSale.id}/payments`, { amount: 301, method: 'UPI' })).status, 400);
+  assert.equal((await T.post(`/api/sales/${teleSale.id}/payments`, { amount: 0, method: 'UPI' })).status, 400);
+  assert.equal((await O.post(`/api/sales/${teleSale.id}/payments`, { amount: 10, method: 'UPI' })).status, 403);
+  assert.equal((await D.post(`/api/sales/${teleSale.id}/payments`, { amount: 10, method: 'UPI' })).status, 403);
+  s = ok(await M.post(`/api/sales/${teleSale.id}/payments`, { amount: 300, method: 'UPI', paid_on: '2026-11-15' }));
+  assert.equal(s.balance, 0); assert.equal(s.payment_status, 'Paid');
+  s = ok(await T.post(`/api/sales/${ids.codSale}/payments`, { amount: 260, method: 'Cash' }));
+  assert.equal(s.payment_status, 'Paid');
+});
+
+test('dispatch deducts physical stock exactly once and uses up the reservation', async () => {
+  assert.equal((await T.post(`/api/sales/${teleSale.id}/status`, { status: 'Packing' })).status, 403);
+  let s = ok(await D.post(`/api/sales/${teleSale.id}/status`, { status: 'Packing' }), 200);
+  assert.equal(s.status, 'Packing');
+  assert.deepEqual(await stock(kozh.id), [10, 1, 9]);
+  // two people press "Dispatched" at the same moment
+  const both = await Promise.all([D.post(`/api/sales/${teleSale.id}/status`, { status: 'Dispatched' }), M.post(`/api/sales/${teleSale.id}/status`, { status: 'Dispatched' })]);
+  assert.deepEqual(both.map(r => r.status), [200, 200]);
+  assert.deepEqual(await stock(kozh.id), [9, 0, 9]);
+  assert.deepEqual(await stock(maam.id), [78, 2, 76]);
+  s = ok(await D.post(`/api/sales/${teleSale.id}/status`, { status: 'Delivered' }), 200);
+  assert.deepEqual(await stock(kozh.id), [9, 0, 9]);
+  assert.equal((await D.post(`/api/sales/${teleSale.id}/status`, { status: 'Packing' })).status, 422); // cannot go back
+  assert.equal((await D.post(`/api/sales/${ids.onsiteSale}/status`, { status: 'Dispatched' })).status, 422); // completed onsite sale
+  const detail = (await M.get(`/api/sales/${teleSale.id}`)).data;
+  assert.equal(detail.stock.filter(m => m.type === 'Stock dispatched').length, 2);
+  assert.ok(detail.history.some(h => h.action === 'status_changed'));
+});
+
+test('cancelling an order releases its reserved stock; dispatched or completed sales cannot be cancelled', async () => {
+  assert.deepEqual(await stock(puzha.id), [20, 5, 15]);
+  assert.equal((await S.post(`/api/sales/${ids.onsiteOrder}/cancel`, {})).status, 400); // reason required
+  assert.equal((await T.post(`/api/sales/${ids.onsiteOrder}/cancel`, { reason: 'x' })).status, 403);
+  const c = ok(await S.post(`/api/sales/${ids.onsiteOrder}/cancel`, { reason: 'Shop changed its mind' }), 200);
+  assert.equal(c.status, 'Cancelled');
+  assert.deepEqual(await stock(puzha.id), [20, 0, 20]);
+  ok(await S.post(`/api/sales/${ids.onsiteOrder}/cancel`, { reason: 'again' }), 200);
+  assert.deepEqual(await stock(puzha.id), [20, 0, 20]);
+  assert.equal((await M.post(`/api/sales/${teleSale.id}/cancel`, { reason: 'x' })).status, 422);
+  assert.equal((await M.post(`/api/sales/${ids.onsiteSale}/cancel`, { reason: 'x' })).status, 422);
+  assert.equal((await M.post(`/api/sales/${ids.onsiteOrder}/payments`, { amount: 10, method: 'UPI' })).status, 422);
+  assert.equal((await M.get('/api/sales')).data.rows.length, 4); // cancelled orders drop out of the default list
+  assert.equal((await M.get('/api/sales?status=Cancelled')).data.rows.length, 1);
+  // a cancelled online order frees its marketplace order ID
+  ok(await O.post(`/api/sales/${ids.onlineSale}/cancel`, { reason: 'Buyer cancelled' }), 200);
+  ok(await O.post('/api/sales', { platform: 'Amazon', platform_order_id: '402-1234567-1234567', customer_name: 'Amazon Buyer', items: [{ book_id: maam.id, qty: 1 }] }));
+});
+
+test('returned books come back into stock after Admin records them, linked to the order', async () => {
+  const no = teleSale.sale_no;
+  assert.equal((await A.post('/api/inventory/movements', { book_id: puzha.id, type: 'Stock returned', qty: 1, sale_no: no })).status, 400); // not on that order
+  ok(await A.post('/api/inventory/movements', { book_id: kozh.id, type: 'Stock returned', qty: 1, sale_no: no, note: 'Checked, good condition' }));
+  assert.deepEqual(await stock(kozh.id), [10, 0, 10]);
+  const mv = (await M.get(`/api/inventory/movements?book_id=${kozh.id}&type=Stock%20returned`)).data.rows;
+  assert.equal(mv.length, 1); assert.equal(mv[0].sale_no, no);
+});
+
+test('stock figures always equal the sum of the movement history', async () => {
+  const rows = await db.all(`SELECT b.name, b.on_hand, b.reserved, COALESCE(SUM(m.on_hand_delta),0) AS oh, COALESCE(SUM(m.reserved_delta),0) AS rs
+    FROM books b LEFT JOIN stock_movements m ON m.book_id = b.id GROUP BY b.id`);
+  for (const r of rows) { assert.equal(r.on_hand, r.oh, r.name); assert.equal(r.reserved, r.rs, r.name); }
+  // reserved stock always equals the copies on open orders
+  const open = await db.all(`SELECT b.name, b.reserved, COALESCE((SELECT SUM(i.qty) FROM sale_items i JOIN sales s ON s.id = i.sale_id
+    WHERE i.book_id = b.id AND s.status IN ('Confirmed','Packing','Ready to Dispatch')),0) AS open_qty FROM books b`);
+  for (const r of open) assert.equal(r.reserved, r.open_qty, r.name);
+});
+
+test('simultaneous orders cannot oversell the last copies', async () => {
+  const last = ok(await A.post('/api/books', { sku: 'NM-900', name: 'Last Copies', price: 100, opening_stock: 3 }));
+  const tries = await Promise.all([1, 2, 3, 4, 5].map(n => T.post('/api/sales', { customer_name: 'Buyer ' + n, customer_phone: '900000010' + n, address: 'x', items: [{ book_id: last.id, qty: 1 }] })));
+  assert.equal(tries.filter(r => r.status === 201).length, 3);
+  assert.equal(tries.filter(r => r.status === 422).length, 2);
+  assert.deepEqual(await stock(last.id), [3, 3, 0]);
+  // an inactive book cannot be sold
+  ok(await A.patch(`/api/books/${last.id}`, { active: false }), 200);
+  assert.equal((await T.post('/api/sales', { customer_name: 'B', customer_phone: '9000000200', address: 'x', items: [{ book_id: last.id, qty: 1 }] })).status, 400);
+});
+
+test('dashboard figures come from the actual records, per role', async () => {
+  const m = (await M.get('/api/dashboard')).data;
+  const list = (await M.get('/api/sales')).data.totals;
+  assert.equal(m.metrics.sales_month, list.amount); assert.equal(m.metrics.outstanding, list.balance);
+  assert.equal(m.metrics.orders_today, list.orders);
+  assert.equal(m.channels.length, 3);
+  assert.ok(m.low_stock.some(b => b.name === 'Last Copies') === false); // inactive books are not flagged
+  const t = (await T.get('/api/dashboard')).data;
+  assert.equal(t.channels, undefined); assert.equal(t.metrics.orders_month, 5); // two for Lakshmi + three "last copies"
+  const d = (await D.get('/api/dashboard')).data;
+  assert.equal(d.metrics.sales_month, undefined); assert.equal(typeof d.metrics.awaiting_packing, 'number');
+});
+
+test('a set or combo has its own price and moves the stock of the books inside it', async () => {
+  const a = ok(await A.post('/api/books', { sku: 'ST-1', name: 'Story One', price: 100, opening_stock: 10 }));
+  const b = ok(await A.post('/api/books', { sku: 'ST-2', name: 'Story Two', price: 100, opening_stock: 4 }));
+  const pack = ok(await A.post('/api/books', { sku: 'ST-SET', name: 'Story Set', kind: 'Pack', mrp: 200, price: 180, items: [{ book_id: a.id }, { book_id: b.id }] }));
+  assert.equal(pack.kind, 'Pack'); assert.equal(pack.available, 4); assert.equal(pack.on_hand, 0); // limited by Story Two
+  assert.equal((await A.post('/api/books', { sku: 'ST-X', name: 'Empty set', kind: 'Pack', price: 1, items: [] })).status, 400);
+  assert.equal((await A.post('/api/books', { sku: 'ST-Y', name: 'Set of sets', kind: 'Pack', price: 1, items: [{ book_id: pack.id }] })).status, 400);
+  assert.equal((await A.post('/api/inventory/movements', { book_id: pack.id, type: 'Stock received', qty: 5 })).status, 422); // no stock on a set
+  // one set + one extra copy of Story One on the same order
+  const s = ok(await T.post('/api/sales', { customer_name: 'Set Buyer', customer_phone: '9000000300', address: 'x', items: [{ book_id: pack.id, qty: 2 }, { book_id: a.id, qty: 1 }] }));
+  assert.equal(s.total_amount, 2 * 180 + 100);
+  assert.deepEqual(await stock(a.id), [10, 3, 7]); assert.deepEqual(await stock(b.id), [4, 2, 2]);
+  assert.equal((await A.get(`/api/books/${pack.id}`)).data.available, 2);
+  // not enough of one book inside the set
+  const over = await T.post('/api/sales', { customer_name: 'Set Buyer', customer_phone: '9000000300', address: 'x', items: [{ book_id: pack.id, qty: 3 }] });
+  assert.equal(over.status, 422); assert.deepEqual(await stock(a.id), [10, 3, 7]);
+  ok(await D.post(`/api/sales/${s.id}/status`, { status: 'Dispatched' }), 200);
+  assert.deepEqual(await stock(a.id), [7, 0, 7]); assert.deepEqual(await stock(b.id), [2, 0, 2]);
+  // a sold set keeps its contents; an open set order releases the right books when cancelled
+  assert.equal((await A.patch(`/api/books/${pack.id}`, { items: [{ book_id: a.id }] })).status, 409);
+  const s2 = ok(await T.post('/api/sales', { customer_name: 'Set Buyer', customer_phone: '9000000300', address: 'x', items: [{ book_id: pack.id, qty: 1 }] }));
+  ok(await T.post(`/api/sales/${s2.id}/cancel`, { reason: 'Changed mind' }), 200);
+  assert.deepEqual(await stock(a.id), [7, 0, 7]); assert.deepEqual(await stock(b.id), [2, 0, 2]);
+  const low = (await M.get('/api/books?low=1')).data; assert.ok(!low.some(x => x.kind === 'Pack'));
+});
+
+test('dashboard charts: sales by period, product, person, channel and district match the sales list', async () => {
+  assert.equal((await T.get('/api/dashboard/trends')).status, 403);
+  const t = ok(await M.get('/api/dashboard/trends'), 200);
+  const list = (await M.get('/api/sales')).data.totals;
+  assert.equal(t.totals.amount, list.amount); assert.equal(t.totals.orders, list.orders);
+  assert.equal(t.group, 'day'); assert.equal(t.series.length, 1); assert.equal(t.series[0].period, '2026-11-16');
+  const sum = a => a.reduce((s, r) => s + r.amount, 0);
+  assert.equal(sum(t.series), list.amount); assert.equal(sum(t.byChannel), list.amount); assert.equal(sum(t.byPerson), list.amount); assert.equal(sum(t.byPayment), list.amount);
+  assert.equal(sum(t.byProduct), list.amount); // every sale here is made of its lines
+  const m = ok(await M.get('/api/dashboard/trends?group=month&channel=Onsite'), 200);
+  assert.equal(m.series[0].period, '2026-11'); assert.equal(m.totals.amount, (await M.get('/api/sales?channel=Onsite')).data.totals.amount);
+  assert.equal(ok(await M.get('/api/dashboard/trends?date_from=2027-01-01'), 200).series.length, 0);
+  assert.equal((await M.get('/api/dashboard/trends?date_from=nonsense')).status, 400);
+});
+
+test('tele-sales calls: every call is recorded, a new number becomes a lead, follow-ups are tracked', async () => {
+  assert.equal((await O.post('/api/calls', { phone: '9111100001', status: 'Busy' })).status, 403);
+  const c1 = ok(await T.post('/api/calls', { phone: '91111 00001', customer_name: 'Lead Person', status: 'Answered', outcome: 'Follow-up', remarks: 'Asked to call back', followup_date: '2026-11-18', followup_time: '10:30', request_key: 'call-1' }));
+  assert.match(c1.call_no, /^CL-\d{6}$/); assert.equal(c1.customer_kind, 'Lead'); assert.equal(c1.followup_at, '2026-11-18T10:30'); assert.equal(c1.salesperson_id, ids.telesales);
+  assert.equal((await T.post('/api/calls', { phone: '91111 00001', status: 'Busy', request_key: 'call-1' })).data.id, c1.id); // double click
+  // validation
+  assert.equal((await T.post('/api/calls', { phone: '9111100001', status: 'Answered' })).status, 400); // outcome needed
+  assert.equal((await T.post('/api/calls', { phone: '9111100001', status: 'Answered', outcome: 'Follow-up' })).status, 400); // follow-up date needed
+  assert.equal((await T.post('/api/calls', { phone: '123', status: 'Busy' })).status, 400);
+  assert.equal((await T.post('/api/calls', { phone: '9111100001', status: 'Wrong Number', called_at: '2027-01-01T10:00' })).status, 400);
+  // a lead is not in the customer list until they buy
+  assert.equal((await M.get('/api/customers?q=9111100001')).data.rows.length, 0);
+  assert.equal((await M.get('/api/customers?q=9111100001&kind=Lead')).data.rows.length, 1);
+  let f = (await T.get('/api/calls/followups')).data.rows;
+  assert.equal(f.length, 1); assert.equal(f[0].due, 'Upcoming');
+  // one-tap statuses need nothing else; calling again completes the waiting follow-up
+  const c2 = ok(await T.post('/api/calls', { phone: '9111100001', status: 'Switched Off' }));
+  assert.equal(c2.outcome, null); assert.equal(c2.customer_id, c1.customer_id); assert.equal(c2.customer_name, 'Lead Person');
+  assert.equal((await T.get('/api/calls/followups')).data.rows.length, 0);
+  // the call that ends in a sale: the lead becomes a customer and the sale is linked to the call
+  const c3 = ok(await T.post('/api/calls', { phone: '9111100001', status: 'Answered', outcome: 'Sale' }));
+  const s = ok(await T.post('/api/sales', { call_id: c3.id, customer_name: 'Lead Person', customer_phone: '9111100001', address: 'Somewhere', items: [{ book_id: maam.id, qty: 1 }], payment_method: 'UPI', amount_received: 100 }));
+  const prof = (await M.get(`/api/customers/${c1.customer_id}`)).data;
+  assert.equal(prof.kind, 'Customer'); assert.equal(prof.calls.length, 3); assert.equal(prof.calls[0].sale_id, s.id); assert.equal(prof.total_orders, 1);
+  // an existing customer who is called stays a customer
+  const c4 = ok(await T.post('/api/calls', { phone: '9847012345', status: 'Answered', outcome: 'Interested' }));
+  assert.equal(c4.customer_kind, 'Customer'); assert.equal(c4.customer_name, 'Lakshmi Nair');
+  // who sees what
+  assert.equal((await T.get('/api/calls')).data.rows.length, 4);
+  ok(await M.post('/api/calls', { phone: '9111100002', status: 'Not Answered' }));
+  assert.equal((await T.get('/api/calls')).data.rows.length, 4); assert.equal((await M.get('/api/calls')).data.rows.length, 5);
+  assert.equal((await M.get(`/api/calls?salesperson=${ids.telesales}&status=unanswered`)).data.rows.length, 1);
+  assert.equal((await D.get('/api/calls')).status, 403);
+  // corrections: own call on the same day, with history; not someone else's
+  const e = ok(await T.patch(`/api/calls/${c4.id}`, { outcome: 'Follow-up', followup_date: '2026-11-20' }), 200);
+  assert.equal(e.followup_at, '2026-11-20T00:00'); assert.ok(e.history.some(h => h.action === 'updated'));
+  const mine = (await M.get('/api/calls')).data.rows.find(r => r.salesperson_id !== ids.telesales);
+  assert.equal((await T.patch(`/api/calls/${mine.id}`, { remarks: 'x' })).status, 403);
+});
+
+test('tele-sales report: day, week and month come from the same call and sale records', async () => {
+  const day = ok(await T.get('/api/calls/report?date_from=2026-11-16&date_to=2026-11-16&by=day'), 200);
+  assert.equal(day.rows.length, 1);
+  const r = day.rows[0];
+  assert.equal(r.calls, 4); assert.equal(r.answered, 3); assert.equal(r.unanswered, 1); assert.equal(r.interested, 0);
+  const sales = (await M.get(`/api/sales?channel=Tele-sales&salesperson=${ids.telesales}`)).data.totals;
+  assert.equal(r.orders, sales.orders); assert.equal(r.sales, sales.amount); assert.equal(r.outstanding, sales.balance);
+  assert.ok(r.collected > 0 && r.books > 0);
+  const week = ok(await T.get('/api/calls/report?date_from=2026-11-16&date_to=2026-11-22&by=day'), 200);
+  assert.equal(week.total.calls, 4); assert.equal(week.total.followups_required, 2); assert.equal(week.total.followups_completed, 1);
+  const month = ok(await T.get('/api/calls/report?date_from=2026-11-01&date_to=2026-11-30&by=week'), 200);
+  assert.equal(month.rows.find(x => x.key === '2026-11-16').calls, 4); assert.equal(month.total.sales, week.total.sales + 0);
+  assert.equal(ok(await T.get('/api/calls/report?date_from=2026-11-01&date_to=2026-11-30&by=month'), 200).rows[0].key, '2026-11');
+  // the Manager sees the team, one row per person
+  const team = ok(await M.get('/api/calls/report?date_from=2026-11-01&date_to=2026-11-30&by=person'), 200);
+  assert.equal(team.total.calls, 5); assert.ok(team.rows.some(x => x.label === 'telesales user' && x.calls === 4));
+  assert.equal((await T.get('/api/calls/report?date_from=2026-11-30&date_to=2026-11-01')).status, 400);
+});
+
+test('onsite visits: a visit is saved with or without a sale, locations are reused, next visits are tracked', async () => {
+  assert.equal((await T.post('/api/visits', { location_type: 'School', location_name: 'X' })).status, 403);
+  // a visit where nothing was sold, to a school with no phone number
+  const v1 = ok(await S.post('/api/visits', { location_type: 'School', location_name: 'Hill View School', address: 'Hill Road', contact_person: 'Mr Thomas', remarks: 'Principal away', next_visit_date: '2026-11-20', request_key: 'v-1' }));
+  assert.match(v1.visit_no, /^V-\d{6}$/); assert.equal(v1.outcome, 'No sale'); assert.equal(v1.sale_id, null); assert.ok(v1.customer_id);
+  assert.equal((await S.post('/api/visits', { location_type: 'School', location_name: 'Hill View School', request_key: 'v-1' })).data.id, v1.id); // double click
+  assert.equal((await S.post('/api/visits', { location_name: 'No type' })).status, 400);
+  assert.equal((await S.post('/api/visits', { location_type: 'School', location_name: 'Y', next_visit_date: '2026-11-01' })).status, 400);
+  let due = (await S.get('/api/visits/due')).data.rows;
+  assert.equal(due.length, 2); // this one, and St Mary's from the earlier onsite sale (next visit 1 Dec)
+  assert.ok(due.some(d => d.location_name === 'Hill View School' && d.due === 'Upcoming'));
+  // the school is now a saved location; the second visit picks it and sells books
+  const locs = (await S.get('/api/locations')).data;
+  const hill = locs.find(l => l.name === 'Hill View School');
+  assert.equal(hill.id, v1.customer_id); assert.equal(hill.contact_person, 'Mr Thomas'); assert.equal(hill.visits, 1);
+  const before = await stock(maam.id);
+  const sale = ok(await S.post('/api/sales', { location_id: hill.id, items: [{ book_id: maam.id, qty: 4 }], payment_method: 'Cash', amount_received: 500, due_date: '2026-12-01' }));
+  assert.equal(sale.customer_id, hill.id); assert.equal(sale.location_name, 'Hill View School'); assert.equal(sale.location_type, 'School'); assert.equal(sale.contact_person, 'Mr Thomas'); assert.equal(sale.address, 'Hill Road');
+  assert.deepEqual(await stock(maam.id), [before[0] - 4, before[1], before[2] - 4]);
+  // typing the same school again (no phone) reuses the record instead of making a second one
+  const v3 = ok(await S.post('/api/visits', { location_type: 'School', location_name: 'hill view school', outcome: 'Payment collected' }));
+  assert.equal(v3.customer_id, hill.id);
+  assert.equal((await S.get('/api/locations')).data.filter(l => l.name.toLowerCase() === 'hill view school').length, 1);
+  const prof = (await M.get(`/api/customers/${hill.id}`)).data;
+  assert.equal(prof.visits.length, 3); assert.equal(prof.visits[1].outcome, 'Sale'); assert.equal(prof.visits[1].sale_id, sale.id); assert.equal(prof.total_orders, 1);
+  // visiting again completed the visit that was due
+  assert.ok(!(await S.get('/api/visits/due')).data.rows.some(d => d.location_name === 'Hill View School'));
+  // an exhibition is an event, not a customer: a walk-in sale creates no customer named after it
+  const ex = ok(await S.post('/api/sales', { location_type: 'Exhibition', location_name: 'Town Book Fair', customer_phone: '9222200001', items: [{ book_id: maam.id, qty: 1 }], payment_method: 'Cash', amount_received: 260 }));
+  assert.equal(ex.customer_id, null); assert.equal(ex.customer_name, 'Town Book Fair');
+  const ex2 = ok(await S.post('/api/sales', { location_type: 'Exhibition', location_name: 'Town Book Fair', customer_name: 'Fair Buyer', customer_phone: '9222200001', items: [{ book_id: maam.id, qty: 1 }], payment_method: 'Cash', amount_received: 260 }));
+  assert.equal((await M.get(`/api/customers/${ex2.customer_id}`)).data.name, 'Fair Buyer');
+  const list = (await M.get('/api/visits?q=Town')).data;
+  assert.equal(list.rows.length, 2); assert.equal(list.totals.with_sale, 2); assert.equal(list.totals.locations, 1);
+  assert.equal((await M.get('/api/visits?outcome=No%20sale')).data.rows.length, 1);
+});
+
+test('customer filters: repeat customers, bought one set but not another, and the Google Contacts file', async () => {
+  const k1a = ok(await A.post('/api/books', { sku: 'F-1A', name: 'Filter One A', price: 50, opening_stock: 50 }));
+  const k1b = ok(await A.post('/api/books', { sku: 'F-1B', name: 'Filter One B', price: 50, opening_stock: 50 }));
+  const k2a = ok(await A.post('/api/books', { sku: 'F-2A', name: 'Filter Two A', price: 50, opening_stock: 50 }));
+  const set1 = ok(await A.post('/api/books', { sku: 'F-S1', name: 'Filter Set 1', kind: 'Pack', price: 90, items: [{ book_id: k1a.id }, { book_id: k1b.id }] }));
+  const set2 = ok(await A.post('/api/books', { sku: 'F-S2', name: 'Filter Set 2', kind: 'Pack', price: 45, items: [{ book_id: k2a.id }] }));
+  const both = ok(await A.post('/api/books', { sku: 'F-ALL', name: 'Filter Bundle', kind: 'Pack', price: 120, items: [{ book_id: k1a.id }, { book_id: k1b.id }, { book_id: k2a.id }] }));
+  const buy = (phone, name, items) => T.post('/api/sales', { customer_name: name, customer_phone: phone, address: 'x', items: items.map(b => ({ book_id: b.id, qty: 1 })) });
+  ok(await buy('9555500001', 'Only Set One', [set1]));
+  ok(await buy('9555500002', 'Both Sets', [set1])); ok(await buy('9555500002', 'Both Sets', [set2]));
+  ok(await buy('9555500003', 'Whole Bundle', [both]));
+  ok(await buy('9555500004', 'Set One In Pieces', [k1a])); ok(await buy('9555500004', 'Set One In Pieces', [k1b]));
+  ok(await buy('9555500005', 'Half Of Set One', [k1a]));
+  const names = async qs => (await M.get('/api/customers?q=95555&' + qs)).data.rows.map(r => r.name).sort();
+  assert.deepEqual(await names(`bought=${set1.id}`), ['Both Sets', 'Only Set One', 'Set One In Pieces', 'Whole Bundle']);
+  assert.deepEqual(await names(`bought=${set1.id}&not_bought=${set2.id}`), ['Only Set One', 'Set One In Pieces']); // the cross-sell list
+  assert.deepEqual(await names(`not_bought=${set1.id}`), ['Half Of Set One']);
+  assert.deepEqual(await names(`bought=${k1a.id}&not_bought=${k1b.id}`), ['Half Of Set One']);
+  assert.deepEqual(await names('orders=repeat'), ['Both Sets', 'Set One In Pieces']);
+  assert.deepEqual(await names(`orders=repeat&not_bought=${set2.id}`), ['Set One In Pieces']);
+  assert.equal((await M.get('/api/customers?q=95555')).data.total, 5);
+  // Google Contacts file: Admin and Manager only, same filters, international numbers
+  const csv = async (c, qs) => { const r = await fetch(base + '/api/customers/google-contacts.csv?' + qs, { headers: { Cookie: c } }); return { status: r.status, text: await r.text() }; };
+  const login = async email => (await fetch(base + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'nm-app' }, body: JSON.stringify({ email, password: pw }) })).headers.get('set-cookie').split(';')[0];
+  const mc = await login('m@x.in'), tc = await login('t@x.in');
+  assert.equal((await csv(tc, 'q=95555')).status, 403);
+  const f = await csv(mc, `q=95555&bought=${set1.id}&not_bought=${set2.id}`);
+  assert.equal(f.status, 200);
+  const lines = f.text.replace(/^﻿/, '').trim().split('\r\n');
+  assert.equal(lines.length, 3); assert.match(lines[0], /^Name,Given Name,Phone 1 - Label/);
+  assert.ok(lines.some(l => l.includes('"Only Set One"') && l.includes('"+919555500001"') && l.includes('Nalla Malayalam Customers')));
+});
+
+test('price by channel: a Website or Amazon order uses that price; other sales use the normal price', async () => {
+  const b = ok(await A.post('/api/books', { sku: 'CH-1', name: 'Channel Book', mrp: 600, price: 510, website_price: 492, amazon_price: 540, opening_stock: 20 }));
+  assert.deepEqual(b.prices, { Website: 492, Amazon: 540 });
+  const sale = (c, extra) => c.post('/api/sales', { customer_name: 'Channel Buyer', items: [{ book_id: b.id, qty: 2 }], ...extra });
+  assert.equal(ok(await sale(O, { platform: 'Website', platform_order_id: 'W-1' })).total_amount, 984);
+  assert.equal(ok(await sale(O, { platform: 'Amazon', platform_order_id: 'A-1' })).total_amount, 1080);
+  assert.equal(ok(await sale(T, { customer_phone: '9666600001', address: 'x' })).total_amount, 1020);
+  // a price typed on the sale still wins
+  assert.equal(ok(await O.post('/api/sales', { platform: 'Website', platform_order_id: 'W-2', customer_name: 'X', items: [{ book_id: b.id, qty: 1, unit_price: 450 }] })).total_amount, 450);
+  // removing the Website price falls back to the normal price; the change is in the history
+  const e = ok(await A.patch(`/api/books/${b.id}`, { website_price: '' }), 200);
+  assert.deepEqual(e.prices, { Amazon: 540 });
+  assert.equal(ok(await sale(O, { platform: 'Website', platform_order_id: 'W-3' })).total_amount, 1020);
+  assert.ok((await A.get(`/api/books/${b.id}`)).data.history.some(h => h.before && h.before.website_price === 492 && h.after.website_price === null));
+  assert.equal((await T.patch(`/api/books/${b.id}`, { website_price: 1 })).status, 403);
+});
+
+test('costs and profit: the figures match the costing sheet, and sold copies get an estimated profit by channel', async () => {
+  const b = ok(await A.post('/api/books', { sku: 'PF-1', name: 'Profit Combo', mrp: 600, price: 510, website_price: 492, amazon_price: 540, opening_stock: 30 }));
+  const put = (c, body) => fetchJson(c, 'PUT', `/api/books/${b.id}/costs`, body);
+  assert.equal((await put(M, { printing: 80 })).status, 403);
+  assert.equal((await put(A, { printing: -1 })).status, 400);
+  assert.equal((await put(A, { printing: 80, packing: 15, postal: 42, misc: 30, ad_cost: 75, amazon_fee: 40, royalty_pct: 15, commission_pct: 7 })).status, 200);
+  assert.equal((await T.get('/api/profit')).status, 403);
+  let r = (await M.get('/api/profit')).data.rows.find(x => x.id === b.id);
+  // the sheet's "Combo Part 1 + Part 2" row
+  assert.equal(r.royalty, 76.5); assert.equal(r.commission, 35.7);
+  assert.equal(r.tele.cost, 354.2); assert.equal(r.tele.profit, 155.8); assert.equal(r.tele.margin, 30.55);
+  assert.equal(r.no_ads, 230.8); assert.equal(r.no_commission, 191.5); assert.equal(r.no_postal, 197.8);
+  assert.equal(r.onsite.profit, 308.5); // the sheet's "Marketplace profit": printing, packing, misc and royalty only
+  assert.equal(r.website.price, 492); assert.equal(r.website.profit, 492 - (80 + 15 + 30 + 42 + 75 + 73.8));
+  assert.equal(r.amazon.price, 540); assert.equal(r.amazon.profit, 540 - (80 + 15 + 30 + 81 + 40));
+  assert.equal(r.break_even, Math.ceil(242 / 0.78));
+  // sold: one by phone at 510, two on Amazon at 540
+  ok(await T.post('/api/sales', { customer_name: 'Profit Buyer', customer_phone: '9777700001', address: 'x', items: [{ book_id: b.id, qty: 1 }] }));
+  ok(await O.post('/api/sales', { platform: 'Amazon', platform_order_id: 'PF-A1', customer_name: 'Amazon Buyer', items: [{ book_id: b.id, qty: 2 }] }));
+  const p = (await M.get('/api/profit?date_from=2026-11-16&date_to=2026-11-16')).data;
+  r = p.rows.find(x => x.id === b.id);
+  assert.equal(r.sold.qty, 3); assert.equal(r.sold.revenue, 510 + 1080); assert.equal(r.sold.profit, 155.8 + 2 * 294);
+  assert.ok(p.total.profit >= r.sold.profit - 0.01 && p.uncosted_revenue > 0); // books without costs are counted apart
+  assert.equal((await M.get('/api/profit?date_from=2027-01-01')).data.rows.find(x => x.id === b.id).sold.qty, 0);
+});
+
+test('Admin can change the dropdown lists and the cost rules; the app uses them at once', async () => {
+  const put = (c, url, body) => c.send('PUT', url, body);
+  assert.equal((await put(M, '/api/settings/lists', { payment_methods: ['UPI'] })).status, 403);
+  assert.equal((await put(A, '/api/settings/lists', { payment_methods: ['UPI', 'Cash'] })).status, 400); // COD is needed by the app
+  const r = ok(await put(A, '/api/settings/lists', { payment_methods: ['UPI', 'Bank Transfer', 'COD', 'Cash', 'Card', 'Other', 'Cheque', ' cheque '],
+    call_statuses: ['Answered', 'Not Answered', 'Busy', 'Switched Off', 'Wrong Number', 'Call Back Later'], location_types: ['School', 'Bookstore', 'Exhibition', 'Mall'] }), 200);
+  assert.equal(r.lists.payment_methods.filter(x => x.toLowerCase() === 'cheque').length, 1);
+  assert.ok(r.lists.customer_types.includes('Mall')); // a new kind of place is a customer type too
+  assert.ok((await T.get('/api/settings/lists')).data.lists.call_statuses.includes('Call Back Later'));
+  // the new choices work in the forms' APIs, and unknown ones are still refused
+  const s = ok(await T.post('/api/sales', { customer_name: 'Cheque Payer', customer_phone: '9888800001', address: 'x', items: [{ book_id: maam.id, qty: 1 }], payment_method: 'Cheque', amount_received: 100 }));
+  assert.equal(s.payment_method, 'Cheque');
+  ok(await T.post(`/api/sales/${s.id}/payments`, { amount: 50, method: 'Cheque' }));
+  assert.equal((await T.post(`/api/sales/${s.id}/payments`, { amount: 10, method: 'Barter' })).status, 400);
+  assert.equal(ok(await T.post('/api/calls', { phone: '9888800001', status: 'Call Back Later' })).outcome, null);
+  const v = ok(await S.post('/api/visits', { location_type: 'Mall', location_name: 'City Mall Stall' }));
+  assert.ok(v.customer_id); assert.ok((await S.get('/api/locations')).data.some(l => l.name === 'City Mall Stall' && l.type === 'Mall'));
+  // cost rules: take the ad cost out of tele-sales and the profit per copy goes up by exactly that
+  const pid = (await M.get('/api/profit')).data.rows.find(x => x.sku === 'PF-1');
+  assert.equal((await put(M, '/api/settings/cost-rules', {})).status, 403);
+  const rules = (await A.get('/api/settings/cost-rules')).data;
+  ok(await put(A, '/api/settings/cost-rules', { ...rules, tele: rules.tele.filter(k => k !== 'ad_cost') }), 200);
+  const after = (await M.get('/api/profit')).data.rows.find(x => x.sku === 'PF-1');
+  assert.equal(after.tele.profit, pid.tele.profit + 75); assert.equal(after.no_ads, after.tele.profit);
+  ok(await put(A, '/api/settings/cost-rules', rules), 200);
+});
+
+test('Admin can correct a saved sale, a payment, a call and a visit; stock and totals follow, with a reason in the history', async () => {
+  const x = ok(await A.post('/api/books', { sku: 'ED-1', name: 'Edit Book One', price: 100, opening_stock: 20 }));
+  const y = ok(await A.post('/api/books', { sku: 'ED-2', name: 'Edit Book Two', price: 60, opening_stock: 20 }));
+  const patch = (c, id, body) => c.patch(`/api/sales/${id}`, body);
+  // an open order: 3 of X reserved
+  const s = ok(await T.post('/api/sales', { customer_name: 'Edit Buyer', customer_phone: '9444400001', address: 'Old address', items: [{ book_id: x.id, qty: 3 }], payment_method: 'UPI', amount_received: 100 }));
+  assert.deepEqual(await stock(x.id), [20, 3, 17]);
+  assert.equal((await patch(M, s.id, { reason: 'x', remarks: 'no' })).status, 403);
+  assert.equal((await patch(A, s.id, { remarks: 'no reason' })).status, 400);
+  // change the books: 1 of X and 2 of Y, at a new price, plus the address
+  ok(await patch(A, s.id, { reason: 'Customer changed the order', address: 'New address', items: [{ book_id: x.id, qty: 1, unit_price: 90 }, { book_id: y.id, qty: 2, unit_price: 60 }] }), 200);
+  let d = (await M.get(`/api/sales/${s.id}`)).data;
+  assert.equal(d.total_amount, 210); assert.equal(d.balance, 110); assert.equal(d.address, 'New address'); assert.equal(d.items.length, 2); assert.equal(d.payment_status, 'Partially Paid');
+  assert.deepEqual(await stock(x.id), [20, 1, 19]); assert.deepEqual(await stock(y.id), [20, 2, 18]);
+  assert.ok(d.history.some(h => h.action === 'changed' && h.reason === 'Customer changed the order' && h.after.total_amount === 210));
+  assert.equal((await patch(A, s.id, { reason: 'x', items: [{ book_id: y.id, qty: 1, unit_price: 60 }] })).status, 400); // total below what was received
+  assert.equal((await patch(A, s.id, { reason: 'x', items: [{ book_id: y.id, qty: 99, unit_price: 60 }] })).status, 422); // not enough stock
+  assert.deepEqual(await stock(y.id), [20, 2, 18]); // a refused change leaves everything as it was
+  // after dispatch the books have left: a change moves physical stock
+  ok(await D.post(`/api/sales/${s.id}/status`, { status: 'Dispatched' }), 200);
+  assert.deepEqual(await stock(y.id), [18, 0, 18]);
+  ok(await patch(A, s.id, { reason: 'Only one copy of Y was sent', items: [{ book_id: x.id, qty: 1, unit_price: 90 }, { book_id: y.id, qty: 1, unit_price: 60 }] }), 200);
+  assert.deepEqual(await stock(y.id), [19, 0, 19]); assert.deepEqual(await stock(x.id), [19, 0, 19]);
+  // a changed contact number moves the sale to that customer
+  ok(await patch(A, s.id, { reason: 'Wrong number typed', customer_phone: '9444400002' }), 200);
+  d = (await M.get(`/api/sales/${s.id}`)).data;
+  assert.equal((await M.get(`/api/customers/${d.customer_id}`)).data.phone, '9444400002'); assert.equal(d.total_amount, 150);
+  // payments: change the amount, then remove it; the sale's figures follow
+  const pid = d.payments[0].id;
+  assert.equal((await M.send('PATCH', `/api/payments/${pid}`, { amount: 120, reason: 'x' })).status, 403);
+  assert.equal((await A.send('PATCH', `/api/payments/${pid}`, { amount: 500, reason: 'x' })).status, 400);
+  ok(await A.send('PATCH', `/api/payments/${pid}`, { amount: 150, method: 'Cash', reason: 'Full amount was paid' }), 200);
+  d = (await M.get(`/api/sales/${s.id}`)).data; assert.equal(d.balance, 0); assert.equal(d.payment_status, 'Paid'); assert.equal(d.payments[0].method, 'Cash');
+  assert.equal((await A.send('DELETE', `/api/payments/${pid}`, {})).status, 400);
+  ok(await A.send('DELETE', `/api/payments/${pid}`, { reason: 'Entered on the wrong sale' }), 200);
+  d = (await M.get(`/api/sales/${s.id}`)).data; assert.equal(d.amount_received, 0); assert.equal(d.payment_status, 'Unpaid'); assert.equal(d.payments.length, 0);
+  assert.ok(d.history.some(h => h.action === 'payment_removed'));
+  // stock still equals its history after all of this
+  const chk = await db.all(`SELECT b.on_hand, b.reserved, COALESCE(SUM(m.on_hand_delta),0) AS oh, COALESCE(SUM(m.reserved_delta),0) AS rs FROM books b LEFT JOIN stock_movements m ON m.book_id = b.id WHERE b.id IN (?,?) GROUP BY b.id`, [x.id, y.id]);
+  for (const r of chk) { assert.equal(r.on_hand, r.oh); assert.equal(r.reserved, r.rs); }
+  // a call logged by mistake: removing it brings back the follow-up it had completed
+  const c1 = ok(await T.post('/api/calls', { phone: '9444400003', status: 'Answered', outcome: 'Follow-up', followup_date: '2026-11-19' }));
+  const c2 = ok(await T.post('/api/calls', { phone: '9444400003', status: 'Busy' }));
+  assert.ok(!(await T.get('/api/calls/followups')).data.rows.some(r => r.id === c1.id));
+  assert.equal((await T.send('DELETE', `/api/calls/${c2.id}`, { reason: 'x' })).status, 403);
+  ok(await A.send('DELETE', `/api/calls/${c2.id}`, { reason: 'Logged twice' }), 200);
+  assert.ok((await T.get('/api/calls/followups')).data.rows.some(r => r.id === c1.id));
+  // a visit: change it, then remove it; a visit with a sale cannot be removed
+  const v = ok(await S.post('/api/visits', { location_type: 'School', location_name: 'Edit Test School', next_visit_date: '2026-11-30' }));
+  ok(await A.send('PATCH', `/api/visits/${v.id}`, { reason: 'Wrong date', remarks: 'Met the head', next_visit_date: '2026-12-05', outcome: 'Payment collected' }), 200);
+  const row = (await M.get('/api/visits?q=Edit%20Test')).data.rows[0];
+  assert.equal(row.remarks, 'Met the head'); assert.equal(row.next_visit_date, '2026-12-05'); assert.equal(row.outcome, 'Payment collected');
+  ok(await A.send('DELETE', `/api/visits/${v.id}`, { reason: 'Entered by mistake' }), 200);
+  assert.equal((await M.get('/api/visits?q=Edit%20Test')).data.rows.length, 0);
+  const withSale = (await M.get('/api/visits?outcome=Sale')).data.rows[0];
+  assert.equal((await A.send('DELETE', `/api/visits/${withSale.id}`, { reason: 'x' })).status, 422);
+});
