@@ -596,3 +596,60 @@ test('Admin can correct a saved sale, a payment, a call and a visit; stock and t
   const withSale = (await M.get('/api/visits?outcome=Sale')).data.rows[0];
   assert.equal((await A.send('DELETE', `/api/visits/${withSale.id}`, { reason: 'x' })).status, 422);
 });
+
+test('dispatch report: form history and orders dispatched in the app are added up by day and month', async () => {
+  const { parseOther } = require('../scripts/import-dispatch');
+  // the "Other" box of the old form, in the team's spellings
+  const p = parseOther('MAMBA3/akshara 1/DOPHIN 2/nankshatra 1/KVS3 6/Kvs 3 1/coppy book 1&2/reading card 1/0');
+  assert.deepEqual(p.items.map(i => [i.key, i.qty]), [['MAMB', 3], ['AKSH', 1], ['DOLP', 2], ['NAKS', 1], ['KVS3', 6], ['KVS3', 1], ['OTHER', 2], ['OTHER', 1]]);
+  assert.equal(p.unknown.length, 0); assert.deepEqual(parseOther('seeds').unknown, ['seeds']);
+
+  const before = (await M.get('/api/dispatch-report?date_from=2026-01-01&date_to=2026-01-31')).data;
+  assert.equal(before.total, 0);
+  const pack = await db.get(`SELECT id, name FROM books WHERE kind = 'Pack' ORDER BY id LIMIT 1`);
+  const single = await db.get(`SELECT id FROM books WHERE kind = 'Book' ORDER BY id LIMIT 1`);
+  await db.run(`INSERT INTO dispatch_history (day, book_id, label, qty) VALUES ('2026-01-05', ?, '', 7), ('2026-01-05', ?, 'KG Combo', 2), ('2026-01-20', ?, '', 3)`, [pack.id, single.id, pack.id]);
+  const day = (await D.get('/api/dispatch-report?date_from=2026-01-01&date_to=2026-01-31')).data;
+  assert.equal(day.total, 12); assert.equal(day.days, 2); assert.deepEqual(day.busiest, { day: '2026-01-05', qty: 9 });
+  assert.deepEqual(day.rows.map(r => [r.period, r.total]), [['2026-01-20', 3], ['2026-01-05', 9]]);
+  assert.equal(day.colTotals[String(pack.id)], 10); assert.equal(day.sources.form.qty, 12);
+  assert.ok(day.items.some(i => i.name === 'KG Combo' && i.qty === 2));
+  const month = (await M.get('/api/dispatch-report?date_from=2026-01-01&date_to=2026-01-31&group=month')).data;
+  assert.deepEqual(month.rows.map(r => [r.period, r.total]), [['2026-01', 12]]);
+  // orders dispatched in the app are counted from the orders themselves, on the day they left
+  const all = (await M.get('/api/dispatch-report')).data;
+  const sent = await db.get(`SELECT COALESCE(SUM(i.qty),0) AS n FROM sale_items i JOIN sales s ON s.id = i.sale_id WHERE s.status <> 'Cancelled' AND EXISTS (SELECT 1 FROM stock_movements m WHERE m.sale_id = s.id AND m.type = 'Stock dispatched')`);
+  assert.ok(Number(sent.n) > 0); assert.equal(all.sources.app.qty, Number(sent.n)); assert.equal(all.total, Number(sent.n) + 12);
+  // sales teams have no use for it
+  assert.equal((await T.get('/api/dispatch-report')).status, 403);
+  assert.equal((await M.get('/api/dispatch-report?group=year')).status, 400);
+});
+
+test('daily dispatch report: the dispatch team types a day, changes it and removes it; the report follows', async () => {
+  const pack = await db.get(`SELECT id FROM books WHERE kind = 'Pack' ORDER BY id LIMIT 1`);
+  const single = await db.get(`SELECT id FROM books WHERE kind = 'Book' AND lower(sku) <> 'other' ORDER BY id LIMIT 1`);
+  if (!(await db.get(`SELECT id FROM books WHERE lower(sku) = 'other'`))) await db.run(`INSERT INTO books (sku, name, category, price) VALUES ('OTHER', 'Other titles', 'Other', 0)`);
+  const put = (c, body) => c.send('PUT', '/api/dispatch-report/day', body);
+  const rep = async () => (await M.get('/api/dispatch-report?date_from=2026-02-01&date_to=2026-02-28')).data;
+  assert.equal((await put(T, { date: '2026-02-10', items: [] })).status, 403);
+  assert.equal((await put(D, { date: '2027-01-01', items: [] })).status, 400);           // not in the future
+  assert.equal((await put(D, { date: '2026-02-10', other: [{ label: '', qty: 2 }] })).status, 400);
+  ok(await put(D, { date: '2026-02-10', items: [{ book_id: pack.id, qty: 5 }, { book_id: single.id, qty: 2 }, { book_id: single.id, qty: 0 }], other: [{ label: 'KG Combo', qty: 1 }] }), 200);
+  let r = await rep(); assert.equal(r.total, 8); assert.equal(r.sources.manual.qty, 8); assert.ok(r.items.some(i => i.name === 'KG Combo'));
+  let day = (await D.get('/api/dispatch-report/day?date=2026-02-10')).data;
+  assert.equal(day.exists, true); assert.equal(day.source, 'manual'); assert.deepEqual(day.other, [{ label: 'KG Combo', qty: 1 }]);
+  assert.ok(day.products.some(p => p.id === pack.id) && !day.products.some(p => p.name === 'Other titles'));
+  // saving the day again replaces it, it does not add to it
+  ok(await put(M, { date: '2026-02-10', items: [{ book_id: pack.id, qty: 3 }] }), 200);
+  r = await rep(); assert.equal(r.total, 3);
+  // a day that came from the old form can be corrected the same way
+  await db.run(`INSERT INTO dispatch_history (day, book_id, label, qty) VALUES ('2026-02-11', ?, '', 9)`, [pack.id]);
+  assert.equal((await D.get('/api/dispatch-report/day?date=2026-02-11')).data.source, 'form');
+  ok(await put(A, { date: '2026-02-11', items: [{ book_id: pack.id, qty: 4 }] }), 200);
+  r = await rep(); assert.equal(r.total, 7);
+  // clearing every count removes the day; each change is in the history
+  assert.equal(ok(await put(A, { date: '2026-02-11', items: [] }), 200).removed, true);
+  r = await rep(); assert.equal(r.total, 3); assert.equal(r.days, 1);
+  const acts = (await db.all(`SELECT action FROM audit_events WHERE entity = 'dispatch_report' ORDER BY id`)).map(a => a.action);
+  assert.deepEqual(acts, ['daily_report_added', 'daily_report_changed', 'daily_report_changed', 'daily_report_removed']);
+});

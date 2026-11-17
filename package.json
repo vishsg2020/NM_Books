@@ -10,7 +10,9 @@
     "backup": "node scripts/backup.js",
     "migrate": "node scripts/migrate.js",
     "import:orders": "node scripts/import-orders.js",
-    "catalogue:update": "node scripts/update-catalogue.js"
+    "catalogue:update": "node scripts/update-catalogue.js",
+    "import:website": "node scripts/import-website.js",
+    "import:dispatch": "node scripts/import-dispatch.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
