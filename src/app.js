@@ -20,6 +20,7 @@ function createApp(db) {
     });
     next();
   });
+  app.use('/api/imports', express.json({ limit: '6mb' })); // an uploaded order file
   app.use(express.json({ limit: '200kb' }));
   app.use(cookieParser());
 
@@ -59,6 +60,7 @@ function createApp(db) {
   require('./routes/settings')(app, ctx);
   require('./routes/edits')(app, ctx);
   require('./routes/dispatch-report')(app, ctx);
+  require('./routes/imports')(app, ctx);
 
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Not found')));
   // Code and pages are re-checked on every load, so an update shows up at once; fonts and images can be kept.

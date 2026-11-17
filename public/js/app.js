@@ -7,6 +7,7 @@ import * as visits from './pages/visits.js';
 import * as profit from './pages/profit.js';
 import * as settings from './pages/settings.js';
 import * as dispatch from './pages/dispatch.js';
+import * as webimport from './pages/webimport.js';
 import * as books from './pages/books.js';
 import * as inventory from './pages/inventory.js';
 import * as users from './pages/users.js';
@@ -22,6 +23,7 @@ const NAV = [
     { path: 'sales', label: 'Orders', roles: ['dispatch'] },
     { path: 'customers', label: 'Customers', roles: SELLERS },
     { path: 'dispatch', label: 'Dispatch report', roles: ['admin', 'manager', 'dispatch'] },
+    { path: 'webimport', label: 'Website orders', roles: ['admin', 'manager', 'online'] },
   ] },
   { group: 'Tele-sales', items: [
     { path: 'calls', label: 'Calls', roles: ['admin', 'manager', 'telesales'] },
@@ -51,6 +53,7 @@ const ROUTES = {
   profit: profit.render,
   settings: settings.render,
   dispatch: dispatch.render,
+  webimport: webimport.render,
   callreport: calls.renderReport,
   books: books.render,
   inventory: inventory.render,

@@ -653,3 +653,67 @@ test('daily dispatch report: the dispatch team types a day, changes it and remov
   const acts = (await db.all(`SELECT action FROM audit_events WHERE entity = 'dispatch_report' ORDER BY id`)).map(a => a.action);
   assert.deepEqual(acts, ['daily_report_added', 'daily_report_changed', 'daily_report_changed', 'daily_report_removed']);
 });
+
+test('website orders: a monthly reminder until the file is uploaded; duplicates and unpaid orders are ignored; stock is untouched', async () => {
+  const H = 'Order Number,Order Status,Order Date,Customer Note,First Name (Billing),Last Name (Billing),Address 1&2 (Billing),City (Billing),Postcode (Billing),Phone (Billing),Order Shipping Amount,Order Refund Amount,Order Total Amount,Item Name,Quantity (- Refund),Item Cost';
+  const line = (no, status, date, phone, ship, total, item, cost) => `${no},${status},${date} 10:00:00,,Web,"Buyer, ${no}","12, Lake Road\nNear the temple",Kochi,682001,${phone},${ship},0,${total},${item},1,${cost}`;
+  const book = await db.get(`SELECT id, name, on_hand FROM books WHERE kind = 'Book' AND lower(sku) <> 'other' ORDER BY id LIMIT 1`);
+  // an order the team typed in by hand for the same customer two days after the website order
+  const typed = ok(await T.post('/api/sales', { sale_date: '2026-10-07', customer_name: 'Hand Typed', customer_phone: '9555500002', address: 'Kochi', payment_method: 'UPI', amount_received: 0, items: [{ book_id: book.id, qty: 1, unit_price: 300 }], request_key: 'web-dup-1' }));
+  const csv = [H,
+    line(9001, 'Processing', '2026-10-03', '+919555500001', 40, 340, 'Some new title', 300),
+    line(9001, 'Processing', '2026-10-03', '+919555500001', 40, 340, 'A book inside the set', 0),   // listed at ₹0: not a line
+    line(9002, 'Processing', '2026-10-05', '9555500002', 0, 300, 'Some new title', 300),               // same phone as the typed order
+    line(9003, 'Failed', '2026-10-06', '9555500003', 0, 300, 'Some new title', 300),
+    line(9004, 'Completed', '2026-10-09', '9555500004', 0, 250, 'Some new title', 250),
+  ].join('\r\n');
+  const post = (c, body) => c.post('/api/imports/website', body);
+  assert.equal((await post(T, { filename: 'x.csv', csv })).status, 403);
+  assert.equal((await post(O, { filename: 'x.csv', csv: 'a,b\n1,2' })).status, 400);
+  let st = (await O.get('/api/imports/website')).data;
+  assert.equal(st.due, true); assert.equal(st.month, 'October 2026'); assert.equal(st.month_from, '2026-10-01');
+  const count = async () => Number((await db.get(`SELECT COUNT(*) AS n FROM sales WHERE import_ref LIKE 'WEB-%'`)).n);
+  // checking the file saves nothing
+  let s = ok(await post(O, { filename: 'orders-oct.csv', csv, dry_run: true }), 200);
+  assert.equal(s.saved, false); assert.equal(s.in_file, 4); assert.equal(s.imported, 2); assert.equal(s.amount, 590);
+  assert.equal(s.already_in_app, 1); assert.equal(s.not_paid, 1); assert.deepEqual(s.not_paid_by_status, { Failed: 1 });
+  assert.equal(await count(), 0); assert.equal((await O.get('/api/imports/website')).data.due, true);
+  // the upload
+  s = ok(await post(O, { filename: 'orders-oct.csv', csv }), 200);
+  assert.equal(s.imported, 2); assert.equal(await count(), 2); assert.equal(s.status.due, false);
+  const sale = await db.get(`SELECT id FROM sales WHERE import_ref = 'WEB-9001'`);
+  const d = (await M.get(`/api/sales/${sale.id}`)).data;
+  assert.equal(d.channel, 'Online'); assert.equal(d.platform, 'Website'); assert.equal(d.platform_order_id, '9001'); assert.equal(d.status, 'Delivered');
+  assert.equal(d.total_amount, 340); assert.equal(d.payment_status, 'Paid'); assert.equal(d.items.length, 1); assert.equal(d.items[0].line_total, 340); // delivery charge inside
+  assert.match(d.address, /Lake Road, Near the temple/);
+  assert.equal((await db.get('SELECT on_hand FROM books WHERE id = ?', [book.id])).on_hand, book.on_hand);
+  assert.equal(Number((await db.get(`SELECT COUNT(*) AS n FROM stock_movements WHERE sale_id = ?`, [sale.id])).n), 0);
+  // the same file again, or a longer export that overlaps: nothing is added twice
+  s = ok(await post(M, { filename: 'orders-oct-nov.csv', csv: csv + '\r\n' + line(9005, 'Processing', '2026-11-02', '9555511115', 0, 100, 'Some new title', 100) }), 200);
+  assert.equal(s.already_imported, 2); assert.equal(s.imported, 1); assert.equal(await count(), 3);
+  // a website order already entered by hand with its order number is a duplicate too
+  ok(await O.post('/api/sales', { sale_date: '2026-11-03', customer_name: 'Typed Web', customer_phone: '9555500006', platform: 'Website', platform_order_id: '9006', payment_method: 'UPI', amount_received: 0, items: [{ book_id: book.id, qty: 1, unit_price: 100 }], request_key: 'web-dup-2' }));
+  s = ok(await post(A, { filename: 'one.csv', csv: [H, line(9006, 'Processing', '2026-11-03', '9555500099', 0, 100, 'Some new title', 100)].join('\n') }), 200);
+  assert.equal(s.imported, 0); assert.equal(s.already_imported, 1);
+  st = (await A.get('/api/imports/website')).data;
+  assert.equal(st.due, false); assert.equal(st.history.length, 3); assert.equal(st.history[0].file, 'one.csv'); // (read before the new-layout uploads below) assert.equal(st.last.by, 'Asha Admin');
+  // the new website's file: one row per order, no phone or items; unpaid and cancelled rows are left out
+  const setp = await db.get(`SELECT b.id, b.name, COALESCE(bp.price, b.price) AS price FROM books b LEFT JOIN book_prices bp ON bp.book_id = b.id AND bp.channel_key = 'Website'
+    WHERE b.active = 1 AND lower(b.sku) <> 'other' AND (SELECT COUNT(*) FROM books x LEFT JOIN book_prices xp ON xp.book_id = x.id AND xp.channel_key = 'Website' WHERE x.active = 1 AND lower(x.sku) <> 'other' AND COALESCE(xp.price, x.price) = COALESCE(bp.price, b.price)) = 1 LIMIT 1`);
+  const simple = ['Order,Customer,Email,Amount,Payment,Status,Date',
+    `"NM-2611-000001","Test, Buyer ","t1@example.com","${setp.price}.00","CAPTURED","SHIPPED","2026-11-10T20:15:00.000Z"`,
+    '"NM-2611-000002","No Match","t2@example.com","7.00","CAPTURED","PAID","2026-11-11T05:00:00.000Z"',
+    '"NM-2611-000003","Failed Pay","t3@example.com","492.00","PENDING","FAILED","2026-11-11T06:00:00.000Z"',
+    '"NM-2611-000004","Cancelled","t4@example.com","492.00","CAPTURED","CANCELLED","2026-11-11T07:00:00.000Z"'].join('\n');
+  s = ok(await post(O, { filename: 'orders.csv', csv: simple }), 200);
+  assert.equal(s.simple, true); assert.equal(s.in_file, 4); assert.equal(s.imported, 2); assert.equal(s.not_paid, 2); assert.equal(s.guessed, 1); assert.equal(s.other_titles, 1); assert.equal(s.new_customers, 0);
+  const n1 = await db.get(`SELECT s.sale_date, s.customer_name, s.customer_id, s.total_amount, s.platform_order_id, s.remarks, i.book_id FROM sales s JOIN sale_items i ON i.sale_id = s.id WHERE s.import_ref = 'WEB-NM-2611-000001'`);
+  assert.equal(n1.sale_date, '2026-11-11'); // 20:15 UTC is the next day in India
+  assert.equal(n1.customer_name, 'Test, Buyer'); assert.equal(n1.customer_id, null); assert.equal(n1.total_amount, setp.price); assert.equal(n1.book_id, setp.id); assert.match(n1.remarks, /t1@example\.com/);
+  assert.equal(ok(await post(O, { filename: 'orders.csv', csv: simple }), 200).imported, 0);
+  // next month the reminder is back
+  process.env.TODAY_OVERRIDE = '2026-12-01';
+  try { st = (await O.get('/api/imports/website')).data; assert.equal(st.due, true); assert.equal(st.month, 'November 2026'); }
+  finally { process.env.TODAY_OVERRIDE = '2026-11-16'; }
+  assert.ok(typed.id);
+});
