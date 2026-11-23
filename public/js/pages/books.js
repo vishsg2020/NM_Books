@@ -1,4 +1,4 @@
-import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, can, fmtStamp, parseHash, wireFilters, qs } from '../core.js';
+import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, can, fmtStamp, parseHash, wireFilters, qs, state } from '../core.js';
 import { movementForm } from './inventory.js';
 
 export const stockPill = b => (!b.active ? pill('Inactive') : b.kind === 'Pack' && b.available > 0 ? pill('In stock') : b.available <= 0 ? pill('Out of stock') : b.available <= b.min_stock ? pill('Low stock') : pill('In stock'));
@@ -25,7 +25,7 @@ export async function render(page) {
     singles = all.filter(b => b.kind !== 'Pack');
     list.innerHTML = table([
       { label: 'Book', cell: b => `${esc(b.name)}${b.kind === 'Pack' ? ' ' + pill('Set', 'blue').__raw : ''}<span class="sub">${esc(b.sku)}${b.category ? ' · ' + esc(b.category) : ''}</span>${b.contents ? `<span class="sub">Contains: ${esc(b.contents)}</span>` : ''}` },
-      { label: 'Price', cls: 'num', cell: b => `${esc(inr(b.price))}${b.mrp && b.mrp !== b.price ? `<span class="sub">MRP ${esc(inr(b.mrp))}</span>` : ''}${b.prices ? Object.entries(b.prices).map(([k, v]) => `<span class="sub">${esc(k)} ${esc(inr(v))}</span>`).join('') : ''}` },
+      { label: 'Price', cls: 'num', cell: b => `${esc(inr(b.price))}${b.mrp && b.mrp !== b.price ? `<span class="sub">MRP ${esc(inr(b.mrp))}</span>` : ''}${b.prices ? Object.entries(b.prices).map(([k, v]) => `<span class="sub">${esc(k === 'Tele-sales' ? 'WhatsApp' : k === 'Amazon' ? 'Amazon/Flipkart' : k)} ${esc(inr(v))}</span>`).join('') : ''}` },
       { label: 'In store', cls: 'num', cell: b => (b.kind === 'Pack' ? '—' : String(b.on_hand)) },
       { label: 'Reserved', cls: 'num', cell: b => (b.kind === 'Pack' ? '—' : String(b.reserved)) },
       { label: 'Available', cls: 'num', cell: b => `<strong>${b.available}</strong><span class="sub">${b.kind === 'Pack' ? 'sets possible' : 'min ' + b.min_stock}</span>` },
@@ -61,11 +61,9 @@ function bookForm(b, after, singles) {
         <div class="field"><label for="b-mrp">MRP</label><div class="money"><span>₹</span><input id="b-mrp" name="mrp" type="number" inputmode="numeric" min="0" step="1" value="${b?.mrp}"></div></div>
         <div class="field"><label for="b-price">Selling price *</label><div class="money"><span>₹</span><input id="b-price" name="price" type="number" inputmode="numeric" min="0" step="1" required value="${b?.price}"></div></div>
       </div>
-      <div class="grid2">
-        <div class="field"><label for="b-wp">Website price</label><div class="money"><span>₹</span><input id="b-wp" name="website_price" type="number" inputmode="numeric" min="0" step="1" value="${b?.prices?.Website}"></div></div>
-        <div class="field"><label for="b-ap">Amazon price</label><div class="money"><span>₹</span><input id="b-ap" name="amazon_price" type="number" inputmode="numeric" min="0" step="1" value="${b?.prices?.Amazon}"></div></div>
-      </div>
-      <p class="hint">Leave these empty to use the selling price. The selling price is used for tele-sales (WhatsApp) and onsite sales.</p>
+      <div class="field${isPack ? '' : ' hidden'}" id="b-dg-f"><label for="b-dg">Discount group</label><select id="b-dg" name="discount_group">${raw(options((state.discountGroups || []).map(g => [g[0], g[1]]), b?.discount_group, 'None: sells at MRP everywhere'))}</select>
+        <div class="hint">For sets only. The group's discounts (Settings → Discounts) make its Website, WhatsApp and Amazon/Flipkart prices from the MRP.${raw(b?.prices ? ' Now: ' + Object.entries(b.prices).map(([k, v]) => `${k === 'Tele-sales' ? 'WhatsApp' : k === 'Amazon' ? 'Amazon/Flipkart' : k} ${inr(v)}`).join(', ') + '.' : '')}</div></div>
+      <p class="hint">The selling price is the MRP for everything that has no discount: single books, single series, onsite and exhibition sales.</p>
       <fieldset id="b-items-f" class="${isPack ? '' : 'hidden'}"><legend>Books in the set</legend>
         <div class="hint">Selling one set takes one copy of each ticked book from stock.</div>
         <div id="b-items" class="chips top-gap">${raw(singles.filter(x => x.active || (isPack && b.contents)).map(x => `<label class="chip"><input type="checkbox" value="${x.id}"><span>${esc(x.name)}</span></label>`).join('') || '<span class="muted">Add the single books first.</span>')}</div><p></p>
@@ -87,6 +85,7 @@ function bookForm(b, after, singles) {
       d.querySelectorAll('input[name=kind]').forEach(r => r.addEventListener('change', () => {
         const pack = r.value === 'Pack' && r.checked;
         d.querySelector('#b-items-f').classList.toggle('hidden', !pack);
+        d.querySelector('#b-dg-f').classList.toggle('hidden', !pack);
         d.querySelector('#b-open-f')?.classList.toggle('hidden', pack);
         d.querySelector('#b-min').closest('.field').classList.toggle('hidden', pack);
       }));

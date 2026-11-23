@@ -44,6 +44,8 @@ function createApp(db) {
   });
   app.post('/api/logout', async (req, res) => { await auth.logout(req, res); res.json({ ok: true }); });
   app.get('/api/health', async (_req, res) => { await db.get('SELECT 1 AS ok'); res.json({ ok: true }); });
+  // The colour theme, before sign-in too (the sign-in page uses it). Not secret.
+  app.get('/api/theme', async (_req, res) => { res.set('Cache-Control', 'no-cache'); res.json({ name: await require('./routes/settings').getTheme(db) }); });
 
   app.use('/api', requireAuth);
   app.use('/api', (req, _res, next) => { if (req.body === undefined) req.body = {}; next(); });

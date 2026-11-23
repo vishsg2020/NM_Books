@@ -161,8 +161,9 @@ async function importWebsiteOrders(db, user, orders, { dry = false, file = '' } 
         WHERE s.status <> 'Cancelled' AND (s.import_ref IS NULL OR s.import_ref NOT LIKE 'WEB-%')`)) { if (!earlier.has(r.p)) earlier.set(r.p, []); earlier.get(r.p).push(r); }
     // For an order without items: the book or set whose website price is exactly the order amount, when there is only one.
     const byPrice = new Map();
-    for (const b of await t.all(`SELECT b.id, b.name, COALESCE(bp.price, b.price) AS price FROM books b LEFT JOIN book_prices bp ON bp.book_id = b.id AND bp.channel_key = 'Website'
-        WHERE b.active = 1 AND lower(b.sku) <> 'other'`)) { if (!byPrice.has(b.price)) byPrice.set(b.price, []); byPrice.get(b.price).push(b); }
+    const discounts = await require('./prices').getDiscounts(t);
+    for (const b of await t.all(`SELECT b.id, b.name, b.price, b.mrp, b.discount_group FROM books b WHERE b.active = 1 AND lower(b.sku) <> 'other'`)) {
+      const price = require('./prices').priceOf(b, 'Website', discounts); if (!byPrice.has(price)) byPrice.set(price, []); byPrice.get(price).push({ ...b, price }); }
     const days = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 864e5);
 
     const todo = [];

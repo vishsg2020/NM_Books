@@ -1,4 +1,4 @@
-import { state, api, get, esc, html, raw, roleName, parseHash, loadLookups, toast, onSubmit, stateBox, closeDrawer } from './core.js';
+import { state, api, get, esc, html, raw, roleName, parseHash, loadLookups, toast, onSubmit, stateBox, closeDrawer, startTheme } from './core.js';
 import * as dashboard from './pages/dashboard.js';
 import * as sales from './pages/sales.js';
 import * as customers from './pages/customers.js';
@@ -35,7 +35,7 @@ const NAV = [
   { group: 'Books', items: [
     { path: 'books', label: 'Book Master', roles: ALL },
     { path: 'inventory', label: 'Stock movements', roles: ['admin', 'manager'] },
-    { path: 'profit', label: 'Costs & profit', roles: ['admin', 'manager'] },
+    // Costs & profit is hidden for now; the page still works at #/profit.
   ] },
   { group: 'Manage', items: [
     { path: 'users', label: 'Users', roles: ['admin'] },
@@ -99,11 +99,11 @@ function renderShell() {
   }).join('');
   app.innerHTML = `
     <div class="topbar"><button type="button" id="menu-btn" aria-expanded="false" aria-controls="side">Menu</button>
-      <img class="brand-mark" src="img/mark-green.png" alt="" width="160" height="164"><strong>Nalla Malayalam</strong></div>
+      <span class="brand-mark logo-mask" aria-hidden="true"></span><strong>Nalla Malayalam</strong></div>
     <div class="shell">
       <nav class="side" id="side" aria-label="Main">
         <a class="brand" href="#/dashboard" aria-label="Nalla Malayalam, go to dashboard">
-          <img class="brand-logo" src="img/logo-green.png" alt="" width="480" height="588">
+          <span class="brand-logo logo-mask" aria-hidden="true"></span>
           <span class="brand-sub">Book sales &amp; inventory</span></a>
         <ul class="nav">${nav}</ul>
         <div class="side-foot">
@@ -164,6 +164,7 @@ async function boot() {
   await route();
 }
 
+startTheme();
 window.addEventListener('hashchange', route);
 window.addEventListener('nm:signed-out', () => { if (state.me) { state.me = null; renderLogin('Your session has ended. Please sign in again.'); } });
 window.addEventListener('nm:changed', () => { loadLookups().catch(() => {}); });

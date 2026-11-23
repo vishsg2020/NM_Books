@@ -21,7 +21,7 @@ function channelFields(ch, c, locations = []) {
     <div class="grid2"><div class="field"><label for="s-pin">PIN</label><input id="s-pin" name="pin" inputmode="numeric" maxlength="7" autocomplete="off" value="${esc(c?.pin)}"><div class="hint">Needed for delivery. Without it the customer goes to Update needed.</div></div></div>`;
   if (ch === 'Online') return `
     <div class="grid2">
-      <div class="field"><label for="s-plat">Platform *</label><select id="s-plat" name="platform">${options(['Website', 'Amazon'], '', 'Select')}</select></div>
+      <div class="field"><label for="s-plat">Platform *</label><select id="s-plat" name="platform">${options(['Website', 'Amazon', 'Flipkart'], '', 'Select')}</select></div>
       <div class="field"><label for="s-oid">Order ID *</label><input id="s-oid" name="platform_order_id" maxlength="80" autocomplete="off"></div>
     </div>
     <div class="grid2">
@@ -92,7 +92,7 @@ export async function saleForm({ customer = null, after = () => {}, callId = nul
           <div class="field" id="s-due-f"><label for="s-due">Due date</label><input id="s-due" name="due_date" type="date"><div class="hint" id="s-due-hint">For any balance.</div></div>
         </div>
         <div id="s-charges" class="hidden">
-          ${raw(charges.delivery_charge ? `<label class="check"><input type="checkbox" id="s-dc"> Add delivery charge of ${esc(inr(charges.delivery_charge))}</label>` : '')}
+          ${raw(charges.delivery_charge ? `<label class="check"><input type="checkbox" id="s-dc"> Add delivery charge of ${esc(inr(charges.delivery_charge))}</label><div class="hint">${charges.free_delivery_above ? `Ticked by itself when the books come to ${esc(inr(charges.free_delivery_above))} or less; free above that.` : ''}</div>` : '')}
           ${raw(charges.cod_charge ? `<label class="check"><input type="checkbox" id="s-cc"> Add COD charge of ${esc(inr(charges.cod_charge))}</label><div class="hint" id="s-cc-hint"></div>` : '')}
         </div>
         <dl class="totals"><dt class="charge-row">Books</dt><dd class="charge-row" id="s-books-total">₹0</dd><dt class="charge-row">Delivery charge</dt><dd class="charge-row" id="s-dc-total">₹0</dd><dt class="charge-row">COD charge</dt><dd class="charge-row" id="s-cc-total">₹0</dd>
@@ -106,16 +106,18 @@ export async function saleForm({ customer = null, after = () => {}, callId = nul
       const $ = sel => d.querySelector(sel);
 
       // ----- price by channel -----
-      // A Website or Amazon order uses that price where the book has one; everything else uses the normal price.
-      const priceFor = b => { const pl = channel === 'Online' ? $('#s-plat')?.value : ''; return (pl && b.prices && b.prices[pl] != null) ? b.prices[pl] : b.price; };
+      // A set in a discount group gets its channel's discount on the MRP (Settings → Discounts); everything else sells at MRP.
+      // Flipkart uses the Amazon rate. Exhibition and visits sell at MRP.
+      const priceKey = () => { if (channel === 'Tele-sales') return 'Tele-sales'; if (channel !== 'Online') return null; const pl = $('#s-plat')?.value; return pl === 'Website' ? 'Website' : pl ? 'Amazon' : null; };
+      const priceFor = b => { const k = priceKey(); return (k && b.prices && b.prices[k] != null) ? b.prices[k] : b.price; };
       // When the channel or platform changes, re-price the lines whose price was not typed by hand.
       const reprice = () => {
         for (const r of lines.querySelectorAll('tr')) {
           const b = books.find(x => String(x.id) === r.querySelector('select').value); const inp = r.querySelector('[data-price]');
           if (b && inp.value === (inp.dataset.auto ?? '')) { inp.value = priceFor(b); inp.dataset.auto = inp.value; }
         }
-        const pl = channel === 'Online' ? $('#s-plat')?.value : '';
-        $('#s-price-hint').textContent = pl ? `${pl} prices are used where a book has one.` : '';
+        const k = priceKey();
+        $('#s-price-hint').textContent = k ? `${k === 'Tele-sales' ? 'WhatsApp' : k === 'Amazon' ? 'Amazon / Flipkart' : 'Website'} discount applied to the sets; single books at MRP.` : 'All books and sets at MRP.';
         recalc();
       };
 
@@ -136,6 +138,8 @@ export async function saleForm({ customer = null, after = () => {}, callId = nul
         const recv = Number($('#s-recv').value) || 0; const method = $('#s-pm').value;
         // Charges (tele-sales orders): the COD charge follows the payment method; both can be unticked.
         const cc = $('#s-cc'); const dc = $('#s-dc'); const withCharges = channel === 'Tele-sales';
+        // Delivery: free when the books come to more than the Settings amount; until someone changes the tick box by hand, it follows the total.
+        if (dc && !dc.dataset.manual) dc.checked = withCharges && total > 0 && !(charges.free_delivery_above && total > charges.free_delivery_above);
         if (cc) { const isCod = method === 'COD'; if (cc.dataset.method !== method) { cc.checked = withCharges && isCod; cc.dataset.method = method; } cc.disabled = !isCod; $('#s-cc-hint').textContent = isCod ? '' : 'Offered when the payment method is COD.'; }
         const delivery = withCharges && dc?.checked ? charges.delivery_charge : 0; const cod = withCharges && cc?.checked && !cc.disabled ? charges.cod_charge : 0;
         $('#s-books-total').textContent = inr(total); $('#s-dc-total').textContent = inr(delivery); $('#s-cc-total').textContent = inr(cod);
@@ -163,7 +167,7 @@ export async function saleForm({ customer = null, after = () => {}, callId = nul
       $('#s-add-line').addEventListener('click', () => addLine().querySelector('select').focus());
       $('#s-recv').addEventListener('input', recalc);
       $('#s-pm').addEventListener('change', recalc);
-      $('#s-dc')?.addEventListener('change', recalc); $('#s-cc')?.addEventListener('change', recalc);
+      $('#s-dc')?.addEventListener('change', e => { e.target.dataset.manual = '1'; recalc(); }); $('#s-cc')?.addEventListener('change', recalc);
 
       // ----- existing customer lookup by contact number -----
       const lookup = debounce(async () => {

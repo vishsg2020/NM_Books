@@ -24,7 +24,8 @@ function unitCost(c, price, mode, rules) {
   if (on.has('commission')) cost += (c.commission_pct / 100) * price;
   return cost;
 }
-const modeOf = (channel, platform) => (channel === 'Onsite' ? 'onsite' : channel === 'Online' ? (platform === 'Amazon' ? 'amazon' : 'website') : 'tele');
+const modeOf = (channel, platform) => (channel === 'Onsite' ? 'onsite' : channel === 'Online' ? (platform === 'Website' ? 'website' : 'amazon') : 'tele');
+const P = require('../prices');
 
 module.exports = (app, { db }) => {
   app.get('/api/profit', requireRole('admin', 'manager'), async (req, res) => {
@@ -32,15 +33,16 @@ module.exports = (app, { db }) => {
     if (q.date_from) { if (!isValidDate(q.date_from)) throw bad('From date is not valid'); where.push('s.sale_date >= @from'); p.from = q.date_from; }
     if (q.date_to) { if (!isValidDate(q.date_to)) throw bad('To date is not valid'); where.push('s.sale_date <= @to'); p.to = q.date_to; }
     const books = await db.all(`SELECT b.id, b.sku, b.name, b.kind, b.category, b.mrp, b.price, b.active,
-        (SELECT json_object_agg(bp.channel_key, bp.price) FROM book_prices bp WHERE bp.book_id = b.id) AS prices,
+        b.discount_group,
         c.printing, c.packing, c.postal, c.misc, c.ad_cost, c.amazon_fee, c.royalty_pct, c.commission_pct, (c.book_id IS NOT NULL) AS has_costs
       FROM books b LEFT JOIN book_costs c ON c.book_id = b.id WHERE b.sku <> 'OTHER' ORDER BY b.kind DESC, b.category NULLS LAST, b.name`);
+    const discounts = await P.getDiscounts(db);
     const sold = await db.all(`SELECT i.book_id, s.channel, s.platform, SUM(i.qty) AS qty, SUM(i.line_total) AS revenue
       FROM sale_items i JOIN sales s ON s.id = i.sale_id WHERE ${where.join(' AND ')} GROUP BY i.book_id, s.channel, s.platform`, p);
     const rows = books.map(b => {
       const c = {}; for (const [k] of [...AMOUNTS, ...PCTS]) c[k] = Number(b[k] || 0);
       const at = (price, mode) => { const cost = unitCost(c, price, mode, rules); return { price, cost: r2(cost), profit: r2(price - cost), margin: price ? r2(((price - cost) / price) * 100) : null }; };
-      const tele = at(b.price, 'tele');
+      const tele = at(P.priceOf(b, 'Tele-sales', discounts), 'tele');
       // The lowest tele-sales price that covers every cost (royalty and commission shrink with the price).
       const tOn = new Set(rules.tele);
       const fixed = ['printing', 'packing', 'misc', 'postal', 'ad_cost', 'amazon_fee'].reduce((t, k) => t + (tOn.has(k) ? c[k] : 0), 0);
@@ -49,8 +51,8 @@ module.exports = (app, { db }) => {
         id: b.id, sku: b.sku, name: b.name, kind: b.kind, mrp: b.mrp, price: b.price, active: b.active, has_costs: b.has_costs, costs: c,
         royalty: r2((c.royalty_pct / 100) * b.price), commission: r2((c.commission_pct / 100) * b.price),
         tele, no_ads: r2(tele.profit + (tOn.has('ad_cost') ? c.ad_cost : 0)), no_commission: r2(tele.profit + (tOn.has('commission') ? (c.commission_pct / 100) * b.price : 0)), no_postal: r2(tele.profit + (tOn.has('postal') ? c.postal : 0)),
-        website: at(b.prices && b.prices.Website != null ? b.prices.Website : b.price, 'website'),
-        amazon: at(b.prices && b.prices.Amazon != null ? b.prices.Amazon : b.price, 'amazon'),
+        website: at(P.priceOf(b, 'Website', discounts), 'website'),
+        amazon: at(P.priceOf(b, 'Amazon', discounts), 'amazon'),
         onsite: at(b.price, 'onsite'),
         break_even: share > 0 ? Math.ceil(fixed / share) : null,
         sold: { qty: 0, revenue: 0, cost: 0, profit: 0 },

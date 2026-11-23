@@ -223,7 +223,7 @@ export const can = (...roles) => state.me && roles.includes(state.me.role);
 
 export async function loadLookups() {
   state.books = await get('/api/books');
-  const st = await get('/api/settings/lists'); state.lists = st.lists; state.locked = st.locked; state.listNames = st.names; state.charges = st.charges || {};
+  const st = await get('/api/settings/lists'); state.lists = st.lists; state.locked = st.locked; state.listNames = st.names; state.charges = st.charges || {}; state.discounts = st.discounts || {}; state.discountGroups = st.discount_groups || []; state.discountChannels = st.discount_channels || []; state.themes = st.themes || []; applyTheme(st.theme);
   state.people = can('admin', 'manager') ? await get('/api/users/salespeople') : [];
 }
 /** Debounces a handler (search boxes). */
@@ -284,4 +284,19 @@ export function districtField(stateName, value = '', id = 's-loc') {
   const v = value || '';
   if (stateName === 'Kerala') return `<label for="${id}">District</label><select id="${id}" name="location">${options([...KERALA_DISTRICTS, ...(v && !KERALA_DISTRICTS.includes(v) ? [v] : [])], v, 'Select district')}</select>`;
   return `<label for="${id}">District</label><input id="${id}" name="location" maxlength="100" placeholder="District or city" value="${esc(v)}">`;
+}
+
+// ---------- Colour theme (Settings → Theme, chosen by the Admin) ----------
+// Each theme is a [data-theme] block in styles.css. The choice is kept in this browser too, so the next page load
+// starts in the right colours before the server answers.
+const THEME_COLOURS = { green: '#6ABD45', blue: '#4A9BE0', teal: '#2FB3A4', maroon: '#C25A6C', purple: '#9B78D6', orange: '#EE9A3E', charcoal: '#4A555E' };
+export function applyTheme(name) {
+  const t = THEME_COLOURS[name] ? name : 'green';
+  document.documentElement.dataset.theme = t;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', THEME_COLOURS[t]);
+  try { localStorage.setItem('nm-theme', t); } catch { /* not kept */ }
+}
+export function startTheme() {
+  try { const t = localStorage.getItem('nm-theme'); if (t) applyTheme(t); } catch { /* none kept */ }
+  fetch('/api/theme', { credentials: 'same-origin' }).then(r => (r.ok ? r.json() : null)).then(r => { if (r && r.name) applyTheme(r.name); }).catch(() => {});
 }

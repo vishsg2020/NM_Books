@@ -6,6 +6,7 @@ const { moveStock, saleStock } = require('../stock');
 const { findOrCreateCustomer, CUSTOMER_TYPES } = require('./customers');
 const { resolveLocation, recordVisit, readLocation } = require('./visits');
 const { getLists } = require('../settings');
+const P = require('../prices');
 
 const MAX_CHARGE = 10000;
 const { bad, forbidden, conflict, str, int, money, date, oneOf, bool, idParam, today, inr } = require('../util');
@@ -38,7 +39,7 @@ module.exports = (app, { db, load }) => {
     const f = { platform: null, platform_order_id: null, location_type: null, location_name: null, contact_person: null, next_visit_date: null };
     let handedOver = false, defaultType = 'Individual', loc = null;
     if (channel === 'Online') {
-      f.platform = oneOf(b.platform, ['Website', 'Amazon'], { required: true, name: 'Platform' });
+      f.platform = oneOf(b.platform, ['Website', 'Amazon', 'Flipkart'], { required: true, name: 'Platform' });
       f.platform_order_id = str(b.platform_order_id, { required: true, name: 'Order ID', max: 80 });
     } else if (channel === 'Onsite') {
       // The school or bookstore: picked from the saved list, or typed in for a new one.
@@ -72,9 +73,10 @@ module.exports = (app, { db, load }) => {
         ? money(it.unit_price, { name: `Unit price on line ${n + 1}`, max: 1000000 }) : null,
     }));
     if (new Set(items.map(i => i.book_id)).size !== items.length) throw bad('The same book is on two lines. Put it on one line with the full quantity.', { field: 'Books' });
-    // The price list for this sale: Website and Amazon orders use their own price where a book has one.
-    const books = await db.all(`SELECT b.id, b.name, COALESCE(bp.price, b.price) AS price, b.active FROM books b
-      LEFT JOIN book_prices bp ON bp.book_id = b.id AND bp.channel_key = ? WHERE b.id = ANY(?::int[])`, [f.platform, items.map(i => i.book_id)]);
+    // The price list for this sale: a set in a discount group gets its channel's discount on the MRP; the rest sells at MRP.
+    const books = await db.all('SELECT b.id, b.name, b.price, b.mrp, b.discount_group, b.active FROM books b WHERE b.id = ANY(?::int[])', [items.map(i => i.book_id)]);
+    const discounts = await P.getDiscounts(db); const key = P.channelKey(channel, f.platform);
+    for (const bk of books) bk.price = P.priceOf(bk, key, discounts);
     for (const it of items) {
       const bk = books.find(x => x.id === it.book_id);
       if (!bk) throw bad('A selected book is not in the Book Master', { field: 'Books' });

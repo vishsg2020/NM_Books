@@ -60,8 +60,9 @@ function cleanList(key, values) {
 }
 
 // Order charges and the size of a "bulk" order. The Admin changes these on the Settings page.
-const DEFAULT_CHARGES = { cod_charge: 30, delivery_charge: 40, bulk_min_copies: 10, bulk_min_amount: 3000 };
-const CHARGE_NAMES = { cod_charge: 'COD charge', delivery_charge: 'Delivery charge', bulk_min_copies: 'Bulk order: copies', bulk_min_amount: 'Bulk order: amount' };
+// Delivery is free when the books come to more than free_delivery_above; otherwise delivery_charge is added.
+const DEFAULT_CHARGES = { cod_charge: 10, delivery_charge: 40, free_delivery_above: 492, bulk_min_copies: 10, bulk_min_amount: 3000 };
+const CHARGE_NAMES = { cod_charge: 'COD charge', delivery_charge: 'Delivery charge', free_delivery_above: 'Free delivery above', bulk_min_copies: 'Bulk order: copies', bulk_min_amount: 'Bulk order: amount' };
 async function getCharges(db) {
   const saved = (await read(db, 'charges')) || {}; const out = {};
   for (const k of Object.keys(DEFAULT_CHARGES)) out[k] = Number.isInteger(saved[k]) && saved[k] >= 0 ? saved[k] : DEFAULT_CHARGES[k];

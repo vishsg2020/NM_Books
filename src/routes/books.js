@@ -3,13 +3,14 @@ const { requireRole } = require('../auth');
 const { audit, history } = require('../audit');
 const { moveStock } = require('../stock');
 const { bad, notFound, conflict, str, int, money, bool, oneOf, idParam } = require('../util');
+const P = require('../prices');
 
 // A pack has no stock of its own: its available figure is how many whole packs the books inside allow.
 const COLS = `b.id, b.sku, b.name, b.category, b.kind, b.mrp, b.price, b.description, b.min_stock, b.on_hand, b.reserved,
   CASE WHEN b.kind = 'Pack' THEN COALESCE((SELECT MIN((c.on_hand - c.reserved) / pi.qty) FROM pack_items pi JOIN books c ON c.id = pi.book_id WHERE pi.pack_id = b.id), 0)
        ELSE b.on_hand - b.reserved END AS available,
   (SELECT string_agg(c.name || CASE WHEN pi.qty > 1 THEN ' × ' || pi.qty ELSE '' END, ', ' ORDER BY c.name) FROM pack_items pi JOIN books c ON c.id = pi.book_id WHERE pi.pack_id = b.id) AS contents,
-  (SELECT json_object_agg(bp.channel_key, bp.price) FROM book_prices bp WHERE bp.book_id = b.id) AS prices,
+  b.discount_group,
   b.active, b.created_at, b.updated_at`;
 
 function fields(b, base = {}) {
@@ -22,26 +23,13 @@ function fields(b, base = {}) {
   if (b.description !== undefined || !('description' in base)) out.description = str(b.description, { name: 'Description', max: 2000 });
   if (b.min_stock !== undefined || !('min_stock' in base)) out.min_stock = int(b.min_stock, { min: 0, max: 1000000, name: 'Minimum stock level' }) ?? 0;
   if (b.active !== undefined) out.active = bool(b.active) ? 1 : 0;
+  if (b.discount_group !== undefined) out.discount_group = b.discount_group ? oneOf(b.discount_group, P.GROUPS.map(g => g[0]), { name: 'Discount group' }) : null;
   return out;
-}
-
-/** Website and Amazon prices from the request: a number sets it, an empty value removes it, undefined leaves it alone. */
-function channelPrices(b) {
-  const out = {};
-  for (const [field, key, label] of [['website_price', 'Website', 'Website price'], ['amazon_price', 'Amazon', 'Amazon price']]) {
-    if (b[field] === undefined) continue;
-    out[key] = b[field] === null || b[field] === '' ? null : money(b[field], { name: label, max: 1000000 });
-  }
-  return out;
-}
-async function saveChannelPrices(t, bookId, prices) {
-  for (const [key, price] of Object.entries(prices)) {
-    if (price === null) await t.run('DELETE FROM book_prices WHERE book_id = ? AND channel_key = ?', [bookId, key]);
-    else await t.run('INSERT INTO book_prices (book_id, channel_key, price) VALUES (?,?,?) ON CONFLICT (book_id, channel_key) DO UPDATE SET price = EXCLUDED.price', [bookId, key, price]);
-  }
 }
 
 module.exports = (app, { db }) => {
+  // Every book row leaves with its channel prices worked out from the discounts (null for books sold at MRP).
+  const withPrices = async rows => { const d = await P.getDiscounts(db); for (const b of [].concat(rows)) if (b) b.prices = P.pricesOf(b, d); return rows; };
   async function assertUnique(f, exceptId = -1) {
     if (await db.get('SELECT 1 AS x FROM books WHERE lower(sku) = lower(?) AND id <> ?', [f.sku, exceptId])) throw conflict('Another book already uses this Book ID / SKU', { field: 'Book ID / SKU' });
     if (await db.get('SELECT 1 AS x FROM books WHERE lower(name) = lower(?) AND id <> ?', [f.name, exceptId])) throw conflict('Another book already has this name', { field: 'Book name' });
@@ -56,12 +44,13 @@ module.exports = (app, { db }) => {
     if (req.query.kind === 'Book' || req.query.kind === 'Pack') { where.push('b.kind = @kind'); p.kind = req.query.kind; }
     if (req.query.category) { where.push('b.category = @category'); p.category = String(req.query.category); }
     if (req.query.q) { where.push("(b.name ILIKE @q OR b.sku ILIKE @q OR b.category ILIKE @q)"); p.q = '%' + String(req.query.q).replace(/[%_\\]/g, '\\$&') + '%'; }
-    res.json(await db.all(`SELECT ${COLS} FROM books b ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY b.active DESC, b.kind DESC, b.category NULLS LAST, b.name`, p));
+    res.json(await withPrices(await db.all(`SELECT ${COLS} FROM books b ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY b.active DESC, b.kind DESC, b.category NULLS LAST, b.name`, p)));
   });
 
   app.get('/api/books/:id', async (req, res) => {
     const book = await db.get(`SELECT ${COLS} FROM books b WHERE b.id = ?`, [idParam(req.params.id)]);
     if (!book) throw notFound('Book');
+    await withPrices(book);
     const canSeeHistory = ['admin', 'manager'].includes(req.user.role);
     const items = await db.all('SELECT pi.book_id, pi.qty, c.name FROM pack_items pi JOIN books c ON c.id = pi.book_id WHERE pi.pack_id = ? ORDER BY c.name', [book.id]);
     res.json({ ...book, items, history: canSeeHistory ? await history(db, 'book', book.id) : [] });
@@ -81,34 +70,30 @@ module.exports = (app, { db }) => {
     const f = fields(req.body);
     const kind = oneOf(req.body.kind, ['Book', 'Pack'], { name: 'Type' }) || 'Book';
     const items = kind === 'Pack' ? await packItems(req.body.items) : [];
-    const cp = channelPrices(req.body);
     const opening = kind === 'Pack' ? 0 : int(req.body.opening_stock, { min: 0, max: 1000000, name: 'Opening stock' }) ?? 0;
     await assertUnique(f);
     const id = await db.tx(async t => {
-      const r = await t.get(`INSERT INTO books (sku, name, category, kind, mrp, price, description, min_stock, active) VALUES (?,?,?,?,?,?,?,?,?) RETURNING id`,
-        [f.sku, f.name, f.category, kind, f.mrp, f.price, f.description, kind === 'Pack' ? 0 : f.min_stock, f.active ?? 1]);
+      const r = await t.get(`INSERT INTO books (sku, name, category, kind, mrp, price, description, min_stock, active, discount_group) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id`,
+        [f.sku, f.name, f.category, kind, f.mrp, f.price, f.description, kind === 'Pack' ? 0 : f.min_stock, f.active ?? 1, f.discount_group || null]);
       for (const it of items) await t.run('INSERT INTO pack_items (pack_id, book_id, qty) VALUES (?,?,?)', [r.id, it.book_id, it.qty]);
-      await saveChannelPrices(t, r.id, cp);
       if (opening > 0) await moveStock(t, { bookId: r.id, type: 'Opening stock', qty: opening, user: req.user });
       await audit(t, req.user, 'book', r.id, 'created', null, { ...f, kind, opening_stock: opening, items: items.length ? items : undefined });
       return r.id;
     });
-    res.status(201).json(await db.get(`SELECT ${COLS} FROM books b WHERE b.id = ?`, [id]));
+    res.status(201).json(await withPrices(await db.get(`SELECT ${COLS} FROM books b WHERE b.id = ?`, [id])));
   });
 
   // Stock figures are never edited here; they change only through stock movements.
   app.patch('/api/books/:id', requireRole('admin'), async (req, res) => {
-    const before = await db.get('SELECT id, sku, name, category, kind, mrp, price, description, min_stock, active FROM books WHERE id = ?', [idParam(req.params.id)]);
+    const before = await db.get('SELECT id, sku, name, category, kind, mrp, price, description, min_stock, active, discount_group FROM books WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Book');
     const next = fields(req.body, before);
     await assertUnique(next, before.id);
     // Read outside the transaction: the local database has a single connection.
-    const cp = channelPrices(req.body);
-    const oldPrices = Object.fromEntries((await db.all('SELECT channel_key, price FROM book_prices WHERE book_id = ?', [before.id])).map(r => [r.channel_key, r.price]));
     const newItems = before.kind === 'Pack' && req.body.items !== undefined ? await packItems(req.body.items) : null;
     await db.tx(async t => {
-      await t.run(`UPDATE books SET sku = ?, name = ?, category = ?, mrp = ?, price = ?, description = ?, min_stock = ?, active = ?, updated_at = now_iso() WHERE id = ?`,
-        [next.sku, next.name, next.category, next.mrp, next.price, next.description, next.kind === 'Pack' ? 0 : next.min_stock, next.active, before.id]);
+      await t.run(`UPDATE books SET sku = ?, name = ?, category = ?, mrp = ?, price = ?, description = ?, min_stock = ?, active = ?, discount_group = ?, updated_at = now_iso() WHERE id = ?`,
+        [next.sku, next.name, next.category, next.mrp, next.price, next.description, next.kind === 'Pack' ? 0 : next.min_stock, next.active, next.discount_group || null, before.id]);
       // The books inside a set can be changed only while no sale uses it, so open orders always release the right stock.
       if (newItems) {
         const items = newItems;
@@ -121,11 +106,8 @@ module.exports = (app, { db }) => {
           await audit(t, req.user, 'book', before.id, 'set_contents_changed', { items: cur }, { items });
         }
       }
-      await saveChannelPrices(t, before.id, cp);
-      const was = {}, now = {};
-      for (const k of Object.keys(cp)) { was[k.toLowerCase() + '_price'] = oldPrices[k] ?? null; now[k.toLowerCase() + '_price'] = cp[k]; }
-      await audit(t, req.user, 'book', before.id, 'updated', { ...before, ...was }, { ...next, ...now });
+      await audit(t, req.user, 'book', before.id, 'updated', before, next);
     });
-    res.json(await db.get(`SELECT ${COLS} FROM books b WHERE b.id = ?`, [before.id]));
+    res.json(await withPrices(await db.get(`SELECT ${COLS} FROM books b WHERE b.id = ?`, [before.id])));
   });
 };

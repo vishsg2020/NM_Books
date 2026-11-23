@@ -472,25 +472,45 @@ test('customer filters: repeat customers, bought one set but not another, and th
   assert.ok(lines.some(l => l.includes('"Only Set One"') && l.includes('"+919555500001"') && l.includes('Nalla Malayalam Customers')));
 });
 
-test('price by channel: a Website or Amazon order uses that price; other sales use the normal price', async () => {
-  const b = ok(await A.post('/api/books', { sku: 'CH-1', name: 'Channel Book', mrp: 600, price: 510, website_price: 492, amazon_price: 540, opening_stock: 20 }));
-  assert.deepEqual(b.prices, { Website: 492, Amazon: 540 });
+test('discounts: a set in a discount group sells at MRP less its channel discount; everything else at MRP; Admin sets the rates', async () => {
+  const b = ok(await A.post('/api/books', { sku: 'CH-1', name: 'Channel Set', mrp: 600, price: 600, discount_group: 'NM12', opening_stock: 30 }));
+  assert.deepEqual(b.prices, { Website: 492, 'Tele-sales': 510, Amazon: 540 }); // 18%, 15% and 10% off
+  assert.equal((await A.post('/api/books', { sku: 'CH-X', name: 'Bad Group', mrp: 100, price: 100, discount_group: 'NOPE' })).status, 400);
   const sale = (c, extra) => c.post('/api/sales', { customer_name: 'Channel Buyer', items: [{ book_id: b.id, qty: 2 }], ...extra });
   assert.equal(ok(await sale(O, { platform: 'Website', platform_order_id: 'W-1' })).total_amount, 984);
   assert.equal(ok(await sale(O, { platform: 'Amazon', platform_order_id: 'A-1' })).total_amount, 1080);
+  assert.equal(ok(await sale(O, { platform: 'Flipkart', platform_order_id: 'F-1' })).total_amount, 1080); // Flipkart: the Amazon rate
   assert.equal(ok(await sale(T, { customer_phone: '9666600001', address: 'x' })).total_amount, 1020);
   // a price typed on the sale still wins
   assert.equal(ok(await O.post('/api/sales', { platform: 'Website', platform_order_id: 'W-2', customer_name: 'X', items: [{ book_id: b.id, qty: 1, unit_price: 450 }] })).total_amount, 450);
-  // removing the Website price falls back to the normal price; the change is in the history
-  const e = ok(await A.patch(`/api/books/${b.id}`, { website_price: '' }), 200);
-  assert.deepEqual(e.prices, { Amazon: 540 });
-  assert.equal(ok(await sale(O, { platform: 'Website', platform_order_id: 'W-3' })).total_amount, 1020);
-  assert.ok((await A.get(`/api/books/${b.id}`)).data.history.some(h => h.before && h.before.website_price === 492 && h.after.website_price === null));
-  assert.equal((await T.patch(`/api/books/${b.id}`, { website_price: 1 })).status, 403);
+  // the Admin changes the rates; the Manager cannot; bad rates are refused
+  const d = (await T.get('/api/settings/lists')).data.discounts;
+  assert.deepEqual(d.KVS3, { Website: 20, 'Tele-sales': 15, Amazon: 10 });
+  assert.equal((await M.send('PUT', '/api/settings/discounts', d)).status, 403);
+  assert.equal((await A.send('PUT', '/api/settings/discounts', { ...d, NM12: { ...d.NM12, Website: 95 } })).status, 400);
+  ok(await A.send('PUT', '/api/settings/discounts', { ...d, NM12: { ...d.NM12, Website: 20 } }), 200);
+  assert.equal(ok(await sale(O, { platform: 'Website', platform_order_id: 'W-3' })).total_amount, 960);
+  // out of the group: MRP everywhere; the change is in the history
+  const e = ok(await A.patch(`/api/books/${b.id}`, { discount_group: '' }), 200);
+  assert.equal(e.prices, null);
+  assert.equal(ok(await sale(O, { platform: 'Website', platform_order_id: 'W-4' })).total_amount, 1200);
+  assert.ok((await A.get(`/api/books/${b.id}`)).data.history.some(h => h.before && h.before.discount_group === 'NM12'));
+  assert.equal((await T.patch(`/api/books/${b.id}`, { discount_group: 'NM12' })).status, 403);
+  ok(await A.send('PUT', '/api/settings/discounts', d), 200);
+});
+
+test('theme: only the Admin changes it; anyone, signed in or not, can read it', async () => {
+  assert.equal((await fetch(base + '/api/theme').then(r => r.json())).name, 'green');
+  assert.equal((await M.send('PUT', '/api/settings/theme', { name: 'blue' })).status, 403);
+  assert.equal((await A.send('PUT', '/api/settings/theme', { name: 'pink' })).status, 400);
+  assert.equal(ok(await A.send('PUT', '/api/settings/theme', { name: 'teal' }), 200).name, 'teal');
+  assert.equal((await fetch(base + '/api/theme').then(r => r.json())).name, 'teal');
+  const st = (await T.get('/api/settings/lists')).data; assert.equal(st.theme, 'teal'); assert.ok(st.themes.includes('charcoal'));
+  ok(await A.send('PUT', '/api/settings/theme', { name: 'green' }), 200);
 });
 
 test('costs and profit: the figures match the costing sheet, and sold copies get an estimated profit by channel', async () => {
-  const b = ok(await A.post('/api/books', { sku: 'PF-1', name: 'Profit Combo', mrp: 600, price: 510, website_price: 492, amazon_price: 540, opening_stock: 30 }));
+  const b = ok(await A.post('/api/books', { sku: 'PF-1', name: 'Profit Combo', mrp: 600, price: 510, discount_group: 'NM12', opening_stock: 30 }));
   const put = (c, body) => fetchJson(c, 'PUT', `/api/books/${b.id}/costs`, body);
   assert.equal((await put(M, { printing: 80 })).status, 403);
   assert.equal((await put(A, { printing: -1 })).status, 400);
@@ -701,8 +721,8 @@ test('website orders: a monthly reminder until the file is uploaded; duplicates 
   st = (await A.get('/api/imports/website')).data;
   assert.equal(st.due, false); assert.equal(st.history.length, 3); assert.equal(st.history[0].file, 'one.csv'); // (read before the new-layout uploads below) assert.equal(st.last.by, 'Asha Admin');
   // the new website's file: one row per order, no phone or items; unpaid and cancelled rows are left out
-  const setp = await db.get(`SELECT b.id, b.name, COALESCE(bp.price, b.price) AS price FROM books b LEFT JOIN book_prices bp ON bp.book_id = b.id AND bp.channel_key = 'Website'
-    WHERE b.active = 1 AND lower(b.sku) <> 'other' AND (SELECT COUNT(*) FROM books x LEFT JOIN book_prices xp ON xp.book_id = x.id AND xp.channel_key = 'Website' WHERE x.active = 1 AND lower(x.sku) <> 'other' AND COALESCE(xp.price, x.price) = COALESCE(bp.price, b.price)) = 1 LIMIT 1`);
+  const webBooks = (await A.get('/api/books')).data.filter(x => x.active && x.sku.toLowerCase() !== 'other').map(x => ({ id: x.id, name: x.name, price: x.prices ? x.prices.Website : x.price }));
+  const setp = webBooks.find(x => webBooks.filter(y => y.price === x.price).length === 1);
   const simple = ['Order,Customer,Email,Amount,Payment,Status,Date',
     `"NM-2611-000001","Test, Buyer ","t1@example.com","${setp.price}.00","CAPTURED","SHIPPED","2026-11-10T20:15:00.000Z"`,
     '"NM-2611-000002","No Match","t2@example.com","7.00","CAPTURED","PAID","2026-11-11T05:00:00.000Z"',
@@ -723,7 +743,7 @@ test('website orders: a monthly reminder until the file is uploaded; duplicates 
 
 test('tele-sales order: State and District, delivery and COD charges from Settings; bulk order customers', async () => {
   let st = (await T.get('/api/settings/lists')).data;
-  assert.deepEqual(st.charges, { cod_charge: 30, delivery_charge: 40, bulk_min_copies: 10, bulk_min_amount: 3000 });
+  assert.deepEqual(st.charges, { cod_charge: 10, delivery_charge: 40, free_delivery_above: 492, bulk_min_copies: 10, bulk_min_amount: 3000 });
   assert.equal((await M.send('PUT', '/api/settings/charges', { cod_charge: 35 })).status, 403);
   assert.equal((await A.send('PUT', '/api/settings/charges', { cod_charge: -1 })).status, 400);
   ok(await A.send('PUT', '/api/settings/charges', { cod_charge: 35, delivery_charge: 50, bulk_min_copies: 5, bulk_min_amount: 0 }), 200);
