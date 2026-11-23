@@ -23,7 +23,8 @@ module.exports = (app, { db }) => {
     const lists = await getLists(db);
     const oldItems = await db.all('SELECT book_id, qty, unit_price FROM sale_items WHERE sale_id = ? ORDER BY id', [id]);
     const next = { sale_date: sale.sale_date, salesperson_id: sale.salesperson_id, customer_name: sale.customer_name, customer_phone: sale.customer_phone, address: sale.address,
-      payment_method: sale.payment_method, due_date: sale.due_date, remarks: sale.remarks, platform_order_id: sale.platform_order_id };
+      payment_method: sale.payment_method, due_date: sale.due_date, remarks: sale.remarks, platform_order_id: sale.platform_order_id,
+      delivery_charge: sale.delivery_charge, cod_charge: sale.cod_charge };
     if (b.sale_date !== undefined) { next.sale_date = date(b.sale_date, { required: true, name: 'Sales date' }); if (next.sale_date > today()) throw bad('The sales date cannot be in the future', { field: 'Sales date' }); }
     if (b.salesperson_id !== undefined) {
       const sp = await db.get(`SELECT id FROM users WHERE id = ? AND role <> 'dispatch'`, [idParam(b.salesperson_id)]);
@@ -53,7 +54,13 @@ module.exports = (app, { db }) => {
       }
       if (JSON.stringify(items) === JSON.stringify(oldItems)) items = null; // nothing changed
     }
-    const total = items ? items.reduce((s, i) => s + i.qty * i.unit_price, 0) : sale.total_amount;
+    // Charges: kept as they are unless sent. The total is always the books plus the two charges.
+    const charge = (v, was, name) => (v === undefined || sale.channel === 'Onsite' ? was : money(v, { name, max: 10000 }) ?? 0);
+    next.delivery_charge = charge(b.delivery_charge, sale.delivery_charge, 'Delivery charge');
+    next.cod_charge = charge(b.cod_charge, sale.cod_charge, 'COD charge');
+    if (next.cod_charge > 0 && next.payment_method !== 'COD') throw bad('A COD charge applies only when the payment method is COD', { field: 'COD charge' });
+    const booksTotal = items ? items.reduce((s, i) => s + i.qty * i.unit_price, 0) : sale.total_amount - sale.delivery_charge - sale.cod_charge;
+    const total = booksTotal + next.delivery_charge + next.cod_charge;
     if (total < sale.amount_received) throw bad(`${inr(sale.amount_received)} has already been received on this sale, more than the new total of ${inr(total)}. Change or remove a payment first.`, { field: 'Books' });
 
     await db.tx(async t => {
@@ -74,9 +81,9 @@ module.exports = (app, { db }) => {
         customerId = next.customer_phone ? (await findOrCreateCustomer(t, { name: next.customer_name, phone: next.customer_phone, address: next.address })).id : null;
       }
       await t.run(`UPDATE sales SET sale_date = ?, salesperson_id = ?, customer_id = ?, customer_name = ?, customer_phone = ?, address = ?, payment_method = ?, due_date = ?, remarks = ?, platform_order_id = ?,
-          total_amount = ?, payment_status = ?, updated_at = now_iso() WHERE id = ?`,
+          delivery_charge = ?, cod_charge = ?, total_amount = ?, payment_status = ?, updated_at = now_iso() WHERE id = ?`,
       [next.sale_date, next.salesperson_id, customerId, next.customer_name, next.customer_phone, next.address, next.payment_method, next.due_date, next.remarks, next.platform_order_id,
-        total, paymentStatus(total, sale.amount_received, next.payment_method), id]);
+        next.delivery_charge, next.cod_charge, total, paymentStatus(total, sale.amount_received, next.payment_method), id]);
       const was = { ...Object.fromEntries(Object.keys(next).map(k => [k, sale[k]])), total_amount: sale.total_amount };
       const now = { ...next, total_amount: total };
       if (items) {

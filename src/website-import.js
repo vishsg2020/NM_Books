@@ -155,9 +155,9 @@ async function importWebsiteOrders(db, user, orders, { dry = false, file = '' } 
     const book = key => books.get(SKU[key].toLowerCase()) || books.get('other');
     const done = new Set((await t.all(`SELECT import_ref FROM sales WHERE import_ref LIKE 'WEB-%'`)).map(r => r.import_ref));
     const typed = new Set((await t.all(`SELECT lower(platform_order_id) AS o FROM sales WHERE platform = 'Website' AND platform_order_id IS NOT NULL AND status <> 'Cancelled'`)).map(r => r.o));
-    const custs = new Map((await t.all('SELECT id, phone_norm FROM customers')).map(c => [c.phone_norm, c.id]));
+    const custs = new Map((await t.all('SELECT id, phone_norm, phone2_norm FROM customers')).flatMap(c => [[c.phone_norm, c.id], ...(c.phone2_norm ? [[c.phone2_norm, c.id]] : [])]));
     const earlier = new Map();
-    for (const r of await t.all(`SELECT c.phone_norm AS p, s.sale_no, s.sale_date, s.total_amount FROM sales s JOIN customers c ON c.id = s.customer_id
+    for (const r of await t.all(`SELECT unnest(array_remove(ARRAY[c.phone_norm, c.phone2_norm], NULL)) AS p, s.sale_no, s.sale_date, s.total_amount FROM sales s JOIN customers c ON c.id = s.customer_id
         WHERE s.status <> 'Cancelled' AND (s.import_ref IS NULL OR s.import_ref NOT LIKE 'WEB-%')`)) { if (!earlier.has(r.p)) earlier.set(r.p, []); earlier.get(r.p).push(r); }
     // For an order without items: the book or set whose website price is exactly the order amount, when there is only one.
     const byPrice = new Map();
@@ -210,8 +210,8 @@ async function importWebsiteOrders(db, user, orders, { dry = false, file = '' } 
 
     if (fresh.size) {
       let n = await reserve(t, 'customer_number_seq', fresh.size);
-      const made = await insertMany(t, 'customers', ['code', 'name', 'phone', 'phone_norm', 'address', 'location', 'pin'],
-        [...fresh.values()].map(o => ['C-' + String(n++).padStart(5, '0'), o.name, o.phone, o.phone, o.address, o.city, o.pin]), 'RETURNING id, phone_norm');
+      const made = await insertMany(t, 'customers', ['code', 'name', 'phone', 'phone_norm', 'address', 'location', 'pin', 'source'],
+        [...fresh.values()].map(o => ['C-' + String(n++).padStart(5, '0'), o.name, o.phone, o.phone, o.address, o.city, o.pin, 'Website']), 'RETURNING id, phone_norm');
       for (const c of made) custs.set(c.phone_norm, c.id);
     }
     if (todo.length) {

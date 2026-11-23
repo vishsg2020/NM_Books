@@ -21,14 +21,14 @@ async function resolveLocation(t, { id, type, name, phone, address, contact_pers
     return id;
   }
   let cid;
-  if (phone) cid = (await findOrCreateCustomer(t, { name, phone, address, type })).id;
+  if (phone) cid = (await findOrCreateCustomer(t, { name, phone, address, type, source: 'Visits' })).id;
   else {
     await t.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', ['location:' + type + ':' + name.toLowerCase()]);
     const found = await t.get(`SELECT id FROM customers WHERE type = ? AND lower(name) = lower(?) ORDER BY id LIMIT 1`, [type, name]);
     if (found) cid = found.id;
     else {
       const { n } = await t.get(`SELECT nextval('customer_number_seq') AS n`);
-      cid = (await t.get('INSERT INTO customers (code, name, address, type) VALUES (?,?,?,?) RETURNING id', ['C-' + String(n).padStart(5, '0'), name, address || null, type])).id;
+      cid = (await t.get(`INSERT INTO customers (code, name, address, type, source) VALUES (?,?,?,?,'Visits') RETURNING id`, ['C-' + String(n).padStart(5, '0'), name, address || null, type])).id;
     }
   }
   await t.run('UPDATE customers SET address = COALESCE(address, ?), contact_person = COALESCE(?, contact_person) WHERE id = ?', [address || null, contact_person || null, cid]);
@@ -113,6 +113,7 @@ module.exports = (app, { db }) => {
     const visitDate = date(b.sale_date || b.visit_date, { name: 'Visit date' }) || today();
     if (visitDate > today()) throw bad('The visit date cannot be in the future', { field: 'Visit date' });
     const loc = await readLocation(db, b);
+    if (loc.type === 'Exhibition') throw bad('A visit is to a school or bookstore. Record an exhibition from Record a sale.', { field: 'Location type' });
     const outcome = oneOf(b.outcome, ['No sale', 'Payment collected'], { name: 'Outcome' }) || 'No sale';
     const remarks = str(b.remarks, { name: 'Remarks', max: 1000 });
     const next = date(b.next_visit_date, { name: 'Next visit date' });

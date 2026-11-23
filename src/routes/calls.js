@@ -44,7 +44,7 @@ module.exports = (app, { db }) => {
     if (q.q) {
       const digits = phoneKey(q.q);
       p.q = '%' + String(q.q).replace(/[%_\\]/g, '\\$&') + '%'; p.digits = digits.length >= 3 ? '%' + digits + '%' : null;
-      where.push('(cu.name ILIKE @q OR c.call_no ILIKE @q OR c.remarks ILIKE @q OR (@digits::text IS NOT NULL AND cu.phone_norm LIKE @digits))');
+      where.push('(cu.name ILIKE @q OR c.call_no ILIKE @q OR c.remarks ILIKE @q OR (@digits::text IS NOT NULL AND (cu.phone_norm LIKE @digits OR cu.phone2_norm LIKE @digits)))');
     }
     const rows = await db.all(`SELECT ${LIST} ${FROM} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY c.called_at DESC, c.id DESC LIMIT 501`, p);
     res.json({ rows: rows.slice(0, 500), truncated: rows.length > 500 });
@@ -122,7 +122,7 @@ module.exports = (app, { db }) => {
     if (fDate && fDate < calledAt.slice(0, 10)) throw bad('The follow-up date is before the call', { field: 'Next follow-up date' });
     const id = await db.tx(async t => {
       // The person called is a customer if they have bought, otherwise a lead (created here when new).
-      const cust = await findOrCreateCustomer(t, { name: name || 'Name not known', phone, kind: 'Lead' });
+      const cust = await findOrCreateCustomer(t, { name: name || 'Name not known', phone, kind: 'Lead', source: 'Calls' });
       if (name && cust.created === false) await t.run(`UPDATE customers SET name = ? WHERE id = ? AND name = 'Name not known'`, [name, cust.id]);
       const { n } = await t.get(`SELECT nextval('call_number_seq') AS n`);
       const c = await t.get(`INSERT INTO calls (call_no, called_at, call_date, salesperson_id, customer_id, status, outcome, remarks, followup_at, followup_date, request_key)

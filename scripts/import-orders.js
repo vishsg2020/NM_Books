@@ -135,7 +135,7 @@ async function main() {
       const { products } = await ensureCatalogue(t);
       const name = Object.fromEntries((await t.all('SELECT id, name FROM books')).map(b => [b.id, b.name]));
       const done = new Set((await t.all('SELECT import_ref FROM sales WHERE import_ref IS NOT NULL')).map(r => r.import_ref));
-      const custs = new Map((await t.all('SELECT id, phone_norm FROM customers')).map(c => [c.phone_norm, c.id]));
+      const custs = new Map((await t.all('SELECT id, phone_norm, phone2_norm FROM customers')).flatMap(c => [[c.phone_norm, c.id], ...(c.phone2_norm ? [[c.phone2_norm, c.id]] : [])]));
       const people = new Map((await t.all('SELECT id, lower(name) AS n FROM users')).map(u => [u.n, u.id]));
       const person = async label => {
         const key = label.toLowerCase();
@@ -189,8 +189,8 @@ async function main() {
       sum.newCustomers = fresh.size;
       if (!dry && fresh.size) {
         let n = await reserve('customer_number_seq', fresh.size);
-        const made = await insertMany('customers', ['code', 'name', 'phone', 'phone_norm', 'address', 'location', 'pin'],
-          [...fresh.values()].map(o => ['C-' + String(n++).padStart(5, '0'), o.name, o.phone, o.phone, o.address, o.district, o.pin]), 'RETURNING id, phone_norm');
+        const made = await insertMany('customers', ['code', 'name', 'phone', 'phone_norm', 'address', 'location', 'pin', 'source'],
+          [...fresh.values()].map(o => ['C-' + String(n++).padStart(5, '0'), o.name, o.phone, o.phone, o.address, o.district, o.pin, 'Order sheet']), 'RETURNING id, phone_norm');
         for (const c of made) custs.set(c.phone_norm, c.id);
       }
       if (!dry && todo.length) {

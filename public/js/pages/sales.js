@@ -99,6 +99,7 @@ export async function openSale(id, after = () => {}) {
         { label: 'Total', cls: 'num', cell: i => esc(inr(i.line_total)) },
       ], s.items)}
       <dl class="totals section-gap">
+        ${s.delivery_charge || s.cod_charge ? `<dt>Books</dt><dd>${esc(inr(s.total_amount - s.delivery_charge - s.cod_charge))}</dd>${s.delivery_charge ? `<dt>Delivery charge</dt><dd>${esc(inr(s.delivery_charge))}</dd>` : ''}${s.cod_charge ? `<dt>COD charge</dt><dd>${esc(inr(s.cod_charge))}</dd>` : ''}` : ''}
         <dt>Total amount</dt><dd class="big">${esc(inr(s.total_amount))}</dd>
         <dt>Amount received</dt><dd>${esc(inr(s.amount_received))}</dd>
         <dt>Balance${s.due_date ? ` · due ${esc(fmtDate(s.due_date))}` : ''}</dt><dd class="${s.balance > 0 ? 'due' : ''}">${esc(inr(s.balance))}</dd>
@@ -214,6 +215,10 @@ function editSaleForm(s, done, back) {
       <fieldset><legend>Books</legend>
         <table class="lines"><thead><tr><th scope="col">Book</th><th scope="col">Quantity</th><th scope="col">Unit price (₹)</th><th scope="col" class="c-total">Total</th><th scope="col"><span class="sr-only">Remove</span></th></tr></thead><tbody id="es-lines">${raw(s.items.map(line).join(''))}</tbody></table>
         <div class="btn-row"><button class="btn small" type="button" id="es-add">Add another book</button></div>
+        ${raw(s.channel === 'Onsite' ? '' : `<div class="grid2">
+          <div class="field"><label for="es-dc">Delivery charge</label><div class="money"><span>₹</span><input id="es-dc" name="delivery_charge" type="number" inputmode="numeric" min="0" step="1" value="${s.delivery_charge || 0}"></div></div>
+          <div class="field"><label for="es-cc">COD charge</label><div class="money"><span>₹</span><input id="es-cc" name="cod_charge" type="number" inputmode="numeric" min="0" step="1" value="${s.cod_charge || 0}"></div><div class="hint">Only for a COD order.</div></div>
+        </div>`)}
         <dl class="totals"><dt>New total</dt><dd class="big" id="es-total"></dd><dt>Already received</dt><dd>${inr(s.amount_received)}</dd><dt>New balance</dt><dd id="es-bal"></dd></dl>
       </fieldset>
       <div class="grid2">
@@ -229,10 +234,11 @@ function editSaleForm(s, done, back) {
       const recalc = () => {
         let total = 0;
         for (const r of lines.querySelectorAll('tr')) { const t = (Number(r.querySelector('[data-qty]').value) || 0) * (Number(r.querySelector('[data-price]').value) || 0); total += t; r.querySelector('.c-total').textContent = inr(t); }
+        total += (Number(d.querySelector('#es-dc')?.value) || 0) + (Number(d.querySelector('#es-cc')?.value) || 0);
         d.querySelector('#es-total').textContent = inr(total); const bal = total - s.amount_received;
         d.querySelector('#es-bal').textContent = bal < 0 ? `${inr(-bal)} less than was received` : inr(bal); d.querySelector('#es-bal').classList.toggle('due', bal !== 0);
       };
-      lines.addEventListener('input', recalc);
+      lines.addEventListener('input', recalc); d.querySelector('#es-dc')?.addEventListener('input', recalc); d.querySelector('#es-cc')?.addEventListener('input', recalc);
       lines.addEventListener('change', e => { if (e.target.tagName === 'SELECT') { const b = books.find(x => String(x.id) === e.target.value); const p = e.target.closest('tr').querySelector('[data-price]'); if (b && !p.value) p.value = b.price; recalc(); } });
       lines.addEventListener('click', e => { const x = e.target.closest('[data-remove]'); if (x && lines.querySelectorAll('tr').length > 1) { x.closest('tr').remove(); recalc(); } });
       d.querySelector('#es-add').addEventListener('click', () => { lines.insertAdjacentHTML('beforeend', line(null)); recalc(); });

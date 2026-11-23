@@ -51,12 +51,12 @@ function editVisitForm(v, after) {
 
 export async function renderList(page, { query }) {
   const people = state.people.filter(p => ['admin', 'manager', 'onsite'].includes(p.role));
-  page.innerHTML = html`<div class="page-head"><div><h1>Visits</h1><div class="sub">Every visit to a school, bookstore or exhibition, whether or not books were sold.</div></div>
+  page.innerHTML = html`<div class="page-head"><div><h1>Visits</h1><div class="sub">Every visit to a school or bookstore, whether or not books were sold. An exhibition is recorded from Record a sale.</div></div>
       <div class="actions"><button class="btn primary" type="button" id="add-v">Record a visit</button></div></div>
     <section class="panel"><h2>Visits to make</h2><div id="v-due"></div></section>
     <form class="filters top-gap" id="v-filters">
       <div class="field grow"><label for="vf-q">Search</label><input id="vf-q" name="q" type="search" placeholder="Place, contact person or remarks" value="${query.q}"></div>
-      <div class="field"><label for="vf-lt">Location type</label><select id="vf-lt" name="location_type">${raw(options(state.lists.location_types, query.location_type, 'All'))}</select></div>
+      <div class="field"><label for="vf-lt">Location type</label><select id="vf-lt" name="location_type">${raw(options(state.lists.places, query.location_type, 'All'))}</select></div>
       <div class="field"><label for="vf-o">Result</label><select id="vf-o" name="outcome">${raw(options(['Sale', 'Order taken', 'No sale', 'Payment collected'], query.outcome, 'All'))}</select></div>
       ${raw(manager() ? `<div class="field"><label for="vf-sp">Sales person</label><select id="vf-sp" name="salesperson">${options(people.map(p => [p.id, p.name]), query.salesperson, 'Everyone')}</select></div>` : '')}
       <div class="field"><label for="vf-f">From</label><input id="vf-f" name="date_from" type="date" value="${query.date_from}"></div>

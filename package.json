@@ -12,7 +12,9 @@
     "import:orders": "node scripts/import-orders.js",
     "catalogue:update": "node scripts/update-catalogue.js",
     "import:website": "node scripts/import-website.js",
-    "import:dispatch": "node scripts/import-dispatch.js"
+    "import:dispatch": "node scripts/import-dispatch.js",
+    "import:whatsapp": "node scripts/import-whatsapp.js",
+    "customers:tidy": "node scripts/tidy-customers.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

@@ -1,6 +1,6 @@
 // Shared helpers: API calls, escaping, formatting, drawers, toasts, forms.
 // lists: the dropdown choices the Admin maintains under Settings (payment methods, call statuses, …).
-export const state = { me: null, books: [], people: [], lists: {}, locked: {}, listNames: {} };
+export const state = { me: null, books: [], people: [], lists: {}, locked: {}, listNames: {}, charges: {} };
 
 export class ApiError extends Error {
   constructor(status, data) { super((data && data.error) || `Request failed (${status})`); this.status = status; this.data = data || {}; }
@@ -223,7 +223,7 @@ export const can = (...roles) => state.me && roles.includes(state.me.role);
 
 export async function loadLookups() {
   state.books = await get('/api/books');
-  const st = await get('/api/settings/lists'); state.lists = st.lists; state.locked = st.locked; state.listNames = st.names;
+  const st = await get('/api/settings/lists'); state.lists = st.lists; state.locked = st.locked; state.listNames = st.names; state.charges = st.charges || {};
   state.people = can('admin', 'manager') ? await get('/api/users/salespeople') : [];
 }
 /** Debounces a handler (search boxes). */
@@ -234,7 +234,7 @@ export function wireFilters(form, reload) {
   form.addEventListener('change', run);
   form.addEventListener('input', debounce(e => { if (e.target.type === 'search') run(); }, 300));
   form.addEventListener('submit', e => e.preventDefault());
-  form.querySelector('[data-clear]')?.addEventListener('click', () => { form.reset(); form.querySelectorAll('input, select').forEach(el => { el.value = ''; }); run(); });
+  form.querySelector('[data-clear]')?.addEventListener('click', () => { form.reset(); form.querySelectorAll('input:not([type=hidden]), select').forEach(el => { el.value = ''; }); run(); });
 }
 
 // ---------- Clipboard ----------
@@ -273,4 +273,15 @@ export function reasonBox({ title, message = '', confirmLabel = 'Confirm', dange
       onSubmit(d.querySelector('#rb-form'), async v => { if (!v.reason.trim()) throw new Error('Give the reason'); await run(v.reason.trim()); close(); then && then(); }); // `then` runs after this box has closed, so it may open another
     },
   });
+}
+
+// States and union territories, for a customer's address. Kerala's districts are offered as a list.
+export const STATES = ['Kerala', 'Tamil Nadu', 'Karnataka', 'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh', 'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jharkhand', 'Madhya Pradesh', 'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram', 'Nagaland', 'Odisha', 'Punjab', 'Rajasthan', 'Sikkim', 'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal',
+  'Andaman and Nicobar Islands', 'Chandigarh', 'Dadra and Nagar Haveli and Daman and Diu', 'Delhi', 'Jammu and Kashmir', 'Ladakh', 'Lakshadweep', 'Puducherry', 'Outside India'];
+export const KERALA_DISTRICTS = ['Thiruvananthapuram', 'Kollam', 'Pathanamthitta', 'Alappuzha', 'Kottayam', 'Idukki', 'Ernakulam', 'Thrissur', 'Palakkad', 'Malappuram', 'Kozhikode', 'Wayanad', 'Kannur', 'Kasaragod'];
+/** The District field for a State: a list for Kerala, a text box for anywhere else. */
+export function districtField(stateName, value = '', id = 's-loc') {
+  const v = value || '';
+  if (stateName === 'Kerala') return `<label for="${id}">District</label><select id="${id}" name="location">${options([...KERALA_DISTRICTS, ...(v && !KERALA_DISTRICTS.includes(v) ? [v] : [])], v, 'Select district')}</select>`;
+  return `<label for="${id}">District</label><input id="${id}" name="location" maxlength="100" placeholder="District or city" value="${esc(v)}">`;
 }

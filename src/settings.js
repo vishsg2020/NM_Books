@@ -59,6 +59,26 @@ function cleanList(key, values) {
   return out;
 }
 
+// Order charges and the size of a "bulk" order. The Admin changes these on the Settings page.
+const DEFAULT_CHARGES = { cod_charge: 30, delivery_charge: 40, bulk_min_copies: 10, bulk_min_amount: 3000 };
+const CHARGE_NAMES = { cod_charge: 'COD charge', delivery_charge: 'Delivery charge', bulk_min_copies: 'Bulk order: copies', bulk_min_amount: 'Bulk order: amount' };
+async function getCharges(db) {
+  const saved = (await read(db, 'charges')) || {}; const out = {};
+  for (const k of Object.keys(DEFAULT_CHARGES)) out[k] = Number.isInteger(saved[k]) && saved[k] >= 0 ? saved[k] : DEFAULT_CHARGES[k];
+  return out;
+}
+function cleanCharges(body, current) {
+  const out = { ...current };
+  for (const k of Object.keys(DEFAULT_CHARGES)) {
+    if (body[k] === undefined) continue;
+    const n = Number(body[k]);
+    if (body[k] === '' || !Number.isInteger(n) || n < 0 || n > 1000000) throw bad(`${CHARGE_NAMES[k]} must be a whole number, 0 or more`, { field: CHARGE_NAMES[k] });
+    out[k] = n;
+  }
+  if (out.bulk_min_copies < 2) throw bad('A bulk order needs at least 2 copies', { field: CHARGE_NAMES.bulk_min_copies });
+  return out;
+}
+
 async function getCostRules(db) {
   const saved = (await read(db, 'cost_rules')) || {};
   const out = {};
@@ -74,4 +94,4 @@ function cleanCostRules(body) {
   return out;
 }
 
-module.exports = { getLists, cleanList, getCostRules, cleanCostRules, write, read, DEFAULT_LISTS, LOCKED, LIST_NAMES, COST_PARTS, COST_MODES, DEFAULT_COST_RULES };
+module.exports = { getCharges, cleanCharges, DEFAULT_CHARGES, getLists, cleanList, getCostRules, cleanCostRules, write, read, DEFAULT_LISTS, LOCKED, LIST_NAMES, COST_PARTS, COST_MODES, DEFAULT_COST_RULES };

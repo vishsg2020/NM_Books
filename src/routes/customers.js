@@ -1,7 +1,7 @@
 'use strict';
 const { requireRole } = require('../auth');
 const { audit } = require('../audit');
-const { getLists } = require('../settings');
+const { getLists, getCharges, read, write } = require('../settings');
 const { bad, notFound, conflict, str, oneOf, idParam, normPhone } = require('../util');
 
 const TYPES = ['Individual', 'School', 'Bookstore', 'Other'];
@@ -25,21 +25,83 @@ const STATS = `
   (SELECT MAX(s.sale_date) FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled') AS last_purchase_date,
   (SELECT COUNT(*) FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled') AS total_orders,
   (SELECT COALESCE(SUM(s.total_amount),0) FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled') AS total_purchase_amount,
-  (SELECT COALESCE(SUM(s.total_amount - s.amount_received),0) FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled') AS outstanding_amount`;
+  (SELECT COALESCE(SUM(s.total_amount - s.amount_received),0) FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled') AS outstanding_amount,
+  (SELECT MAX(s.total_amount) FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled') AS largest_order`;
+
+// Where a customer came from (customers.source).
+const SOURCES = ['Order sheet', 'Sales', 'WhatsApp group', 'Website', 'Calls', 'Visits'];
+
+// (No '?' in this SQL: the database helper reads every '?' as a parameter.)
+// A name that is probably not a person's name: a number in it, a remark ("Confirmed order"), an address word, a bare title.
+const ODD_NAME = `(c.name ~ '[0-9]' OR length(c.name) > 45 OR length(btrim(c.name)) < 3 OR c.name ~ '^[^A-Za-z\\u0D00-\\u0D7F]'
+  OR c.name ~* '^(to|hm|sir|madam|mr|mrs|ms|dr|teacher|principal|hi|hello|ok|my address|address)\\.{0,1}$'
+  OR c.name ~* '\\m(order|ordered|confirmed|address|pincode|pin|mob|mobile|phone|ph|whatsapp|house|nagar|ayach|ayachal|ayakkanam|cod|nml|kvs|story|books{0,1}|part|urgent|vangum|venam|kittiyilla|po|post)\\M'
+  OR c.name ~* '\\(h\\)')`;
+const lit = v => "'" + String(v).replace(/'/g, "''") + "'";
+/**
+ * Why a customer's record needs an update, as a SQL text[] (empty when the record is complete). Leads are never flagged.
+ * Schools and bookstores (the `places` types) are not asked for a PIN.
+ */
+function needsSql(places) {
+  return `CASE WHEN c.kind <> 'Customer' THEN ARRAY[]::text[] ELSE array_remove(ARRAY[
+    CASE WHEN c.name IN ('Name not known', 'Name not recorded') OR (c.name_ok = 0 AND ${ODD_NAME}) THEN 'Name to check' END,
+    CASE WHEN c.name_ok = 0 AND c.name ~ '[\\u0D00-\\u0D7F]' THEN 'Name in Malayalam' END,
+    CASE WHEN c.type = ANY(ARRAY[${places.map(lit).join(',') || "''"}]::text[]) THEN NULL WHEN c.pin IS NULL OR btrim(c.pin) = '' THEN 'PIN missing' WHEN c.pin !~ '^[1-9][0-9]{5}$' THEN 'PIN wrong' END,
+    CASE WHEN c.address IS NULL OR length(btrim(c.address)) < 8 THEN 'Address missing' END,
+    CASE WHEN NOT EXISTS (SELECT 1 FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled') THEN 'No order' END
+  ]::text[], NULL) END`;
+}
+const REASONS = ['Name to check', 'Name in Malayalam', 'PIN missing', 'PIN wrong', 'Address missing', 'No order'];
+
+/**
+ * Merges customer `otherId` into `keepId` (t is a transaction handle). Sales, calls and visits move to the kept record;
+ * its empty details are filled from the other; the other's number becomes the second number. The other record is deleted.
+ */
+async function mergeCustomers(t, keepId, otherId, user, reason) {
+  if (keepId === otherId) throw bad('Choose two different customers');
+  const rows = await t.all('SELECT * FROM customers WHERE id = ANY(?::int[]) ORDER BY id FOR UPDATE', [[keepId, otherId]]);
+  const a = rows.find(r => r.id === keepId); const b = rows.find(r => r.id === otherId);
+  if (!a || !b) throw notFound('Customer');
+  // Numbers: the kept record's own, then one more. Any number beyond two is written into the notes.
+  const numbers = [];
+  for (const [ph, key] of [[a.phone, a.phone_norm], [a.phone2, a.phone2_norm], [b.phone, b.phone_norm], [b.phone2, b.phone2_norm]]) if (key && !numbers.some(n => n.key === key)) numbers.push({ ph, key });
+  const extra = numbers.slice(2).map(n => n.ph);
+  const unknown = n => !n || n === 'Name not known' || n === 'Name not recorded';
+  const notes = [...new Set([a.notes, b.notes, extra.length ? `Other number${extra.length > 1 ? 's' : ''}: ${extra.join(', ')}` : null].filter(Boolean))].join(' ').slice(0, 1000) || null;
+  const next = {
+    name: unknown(a.name) && !unknown(b.name) ? b.name : a.name,
+    phone: numbers[0] ? numbers[0].ph : null, phone_norm: numbers[0] ? numbers[0].key : null,
+    phone2: numbers[1] ? numbers[1].ph : null, phone2_norm: numbers[1] ? numbers[1].key : null,
+    address: a.address || b.address, location: a.location || b.location, state: a.state || b.state, pin: a.pin || b.pin,
+    contact_person: a.contact_person || b.contact_person, notes,
+    kind: a.kind === 'Customer' || b.kind === 'Customer' ? 'Customer' : a.kind,
+    source: a.created_at <= b.created_at ? a.source : b.source, created_at: a.created_at <= b.created_at ? a.created_at : b.created_at,
+  };
+  const moved = {};
+  for (const table of ['sales', 'calls', 'visits']) moved[table] = (await t.run(`UPDATE ${table} SET customer_id = ? WHERE customer_id = ?`, [a.id, b.id])).rowCount;
+  await t.run('DELETE FROM customers WHERE id = ?', [b.id]);
+  await t.run(`UPDATE customers SET name = ?, phone = ?, phone_norm = ?, phone2 = ?, phone2_norm = ?, address = ?, location = ?, state = ?, pin = ?, contact_person = ?, notes = ?,
+      kind = ?, source = ?, created_at = ?, updated_at = now_iso() WHERE id = ?`,
+  [next.name, next.phone, next.phone_norm, next.phone2, next.phone2_norm, next.address, next.location, next.state, next.pin, next.contact_person, next.notes, next.kind, next.source, next.created_at, a.id]);
+  const keep = k => ({ code: k.code, name: k.name, phone: k.phone, phone2: k.phone2, address: k.address, location: k.location, state: k.state, pin: k.pin });
+  await audit(t, user, 'customer', a.id, 'merged', { ...keep(a), merged_from: keep(b) }, { ...next, phone_norm: undefined, phone2_norm: undefined, moved }, reason || 'Same person, two records');
+  await audit(t, user, 'customer', b.id, 'merged_into', keep(b), { into: a.code }, reason || 'Same person, two records');
+  return { kept: a.id, removed: b.code, moved };
+}
 
 /**
  * Finds the customer with this contact number or creates one. `t` is a transaction handle.
  * An existing customer keeps their name; an empty address or location is filled in from the sale.
  */
-async function findOrCreateCustomer(t, { name, phone, address, location, type, kind = 'Customer' }) {
+async function findOrCreateCustomer(t, { name, phone, address, location, state, pin, type, kind = 'Customer', source = 'Sales' }) {
   const key = validPhone(phone, 'Customer contact number');
   // Two sales for a new number at the same moment must not both create the customer.
   await t.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', ['customer:' + key]);
-  const existing = await t.get('SELECT * FROM customers WHERE phone_norm = ?', [key]);
+  const existing = await t.get('SELECT * FROM customers WHERE phone_norm = ? OR phone2_norm = ? ORDER BY (phone_norm = ?) DESC LIMIT 1', [key, key, key]);
   if (existing) {
-    if ((!existing.address && address) || (!existing.location && location)) {
-      await t.run('UPDATE customers SET address = COALESCE(address, ?), location = COALESCE(location, ?), updated_at = now_iso() WHERE id = ?',
-        [address || null, location || null, existing.id]);
+    if ((!existing.address && address) || (!existing.location && location) || (!existing.state && state) || (!existing.pin && pin)) {
+      await t.run('UPDATE customers SET address = COALESCE(address, ?), location = COALESCE(location, ?), state = COALESCE(state, ?), pin = COALESCE(pin, ?), updated_at = now_iso() WHERE id = ?',
+        [address || null, location || null, state || null, pin || null, existing.id]);
     }
     // A lead becomes a customer with their first purchase; the record (and its call history) stays the same.
     if (kind === 'Customer' && existing.kind === 'Lead') {
@@ -48,8 +110,8 @@ async function findOrCreateCustomer(t, { name, phone, address, location, type, k
     return { id: existing.id, created: false };
   }
   const { n } = await t.get(`SELECT nextval('customer_number_seq') AS n`);
-  const r = await t.get(`INSERT INTO customers (code, name, phone, phone_norm, address, location, type, kind) VALUES (?,?,?,?,?,?,?,?) RETURNING id`,
-    ['C-' + String(n).padStart(5, '0'), name, String(phone).trim(), key, address || null, location || null, type || 'Individual', kind]);
+  const r = await t.get(`INSERT INTO customers (code, name, phone, phone_norm, address, location, state, pin, type, kind, source) VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id`,
+    ['C-' + String(n).padStart(5, '0'), name, String(phone).trim(), key, address || null, location || null, state || null, pin || null, type || 'Individual', kind, source]);
   return { id: r.id, created: true };
 }
 
@@ -60,16 +122,24 @@ module.exports = (app, { db }) => {
       WHERE s.customer_id = c.id AND s.status <> 'Cancelled' AND COALESCE(pk.book_id, i.book_id) = ${bookExpr})`;
   const BOUGHT = param => `NOT EXISTS (SELECT 1 FROM (SELECT book_id FROM pack_items WHERE pack_id = @${param}
       UNION ALL SELECT @${param}::int WHERE NOT EXISTS (SELECT 1 FROM pack_items WHERE pack_id = @${param})) part WHERE NOT ${OWNS('part.book_id')})`;
+  const BULK = `(SELECT COALESCE(SUM(i.qty),0) FROM sale_items i WHERE i.sale_id = s.id) >= @bulk_copies OR (@bulk_amount > 0 AND s.total_amount >= @bulk_amount)`;
   const idList = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 10).map(idParam);
 
   /** The customer list query for the given filters (shared by the list and the Google Contacts download). */
-  function customerQuery(q) {
+  function customerQuery(q, charges, lists) {
     const where = []; const p = {};
+    if (q.source) { where.push('c.source = @source'); p.source = oneOf(q.source, SOURCES, { name: 'Added from' }); }
+    // Bulk order customers: at least one order with many copies, or of a large amount (both set on the Settings page).
+    if (q.bulk === '1') {
+      p.bulk_copies = charges.bulk_min_copies; p.bulk_amount = charges.bulk_min_amount;
+      where.push(`EXISTS (SELECT 1 FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled' AND (${BULK}))`);
+    }
+    if (q.state) { where.push('lower(c.state) = lower(@state)'); p.state = String(q.state); }
     if (q.q) {
       const digits = phoneKey(q.q);
       p.q = '%' + String(q.q).replace(/[%_\\]/g, '\\$&') + '%';
       p.digits = digits.length >= 3 ? '%' + digits + '%' : null;
-      where.push('(c.name ILIKE @q OR c.code ILIKE @q OR c.location ILIKE @q OR (@digits::text IS NOT NULL AND c.phone_norm LIKE @digits))');
+      where.push('(c.name ILIKE @q OR c.code ILIKE @q OR c.location ILIKE @q OR (@digits::text IS NOT NULL AND (c.phone_norm LIKE @digits OR c.phone2_norm LIKE @digits)))');
     }
     // Customers have bought; leads have only been called. The list shows customers unless asked otherwise.
     if (q.kind === 'Lead') where.push(`c.kind = 'Lead'`); else if (q.kind !== 'all') where.push(`c.kind = 'Customer'`);
@@ -80,14 +150,19 @@ module.exports = (app, { db }) => {
     idList(q.not_bought).forEach((id, n) => { p['n' + n] = id; where.push('NOT ' + BOUGHT('n' + n)); });
     const outer = [];
     if (q.outstanding === '1') outer.push('outstanding_amount > 0');
-    if (q.orders === 'repeat') outer.push('total_orders >= 2'); else if (q.orders === 'once') outer.push('total_orders = 1');
-    const sql = `SELECT * FROM (SELECT c.*, ${STATS} FROM customers c ${where.length ? 'WHERE ' + where.join(' AND ') : ''}) x
+    const ORDERS = { repeat: 'total_orders >= 2', once: 'total_orders = 1', twice: 'total_orders = 2', '3plus': 'total_orders >= 3', none: 'total_orders = 0' };
+    if (q.orders) outer.push(ORDERS[oneOf(q.orders, Object.keys(ORDERS), { name: 'Orders' })]);
+    // Two lists: complete customers, and customers whose record needs an update. A search looks in both.
+    if (q.view === 'update') outer.push('cardinality(needs) > 0');
+    else if (!q.q) outer.push('cardinality(needs) = 0');
+    if (q.reason) { outer.push('@reason = ANY(needs)'); p.reason = oneOf(q.reason, REASONS, { name: 'Reason' }); }
+    const sql = `SELECT * FROM (SELECT c.*, ${STATS}, ${needsSql(lists.places)} AS needs FROM customers c ${where.length ? 'WHERE ' + where.join(' AND ') : ''}) x
       ${outer.length ? 'WHERE ' + outer.join(' AND ') : ''} ORDER BY last_purchase_date DESC NULLS LAST, name`;
     return { sql, p };
   }
 
   app.get('/api/customers', requireRole(...VIEWERS), async (req, res) => {
-    const { sql, p } = customerQuery(req.query);
+    const { sql, p } = customerQuery(req.query, await getCharges(db), await getLists(db));
     const rows = await db.all(`${sql} LIMIT 501`, p);
     const { n } = await db.get(`SELECT COUNT(*) AS n FROM (${sql}) y`, p);
     res.json({ rows: rows.slice(0, 500), truncated: rows.length > 500, total: n });
@@ -96,17 +171,17 @@ module.exports = (app, { db }) => {
   // The filtered customers as a file that Google Contacts can import (contacts.google.com → Import).
   // Admin and Manager only: it is the whole contact list in one download. Every download is logged.
   app.get('/api/customers/google-contacts.csv', requireRole('admin', 'manager'), async (req, res) => {
-    const { sql, p } = customerQuery(req.query);
+    const { sql, p } = customerQuery(req.query, await getCharges(db), await getLists(db));
     const rows = (await db.all(sql, p)).filter(c => c.phone_norm);
     const label = str(req.query.label, { name: 'Label', max: 60 }) || 'Nalla Malayalam Customers';
     // Quote every cell; a cell that a spreadsheet could read as a formula gets a leading apostrophe.
     const cell = v => { let t = v === null || v === undefined ? '' : String(v).replace(/\r?\n/g, ', '); if (/^[=+\-@\t]/.test(t)) t = "'" + t; return '"' + t.replace(/"/g, '""') + '"'; };
     const intl = k => (k.length === 10 ? '+91' + k : '+' + k);
-    const head = ['Name', 'Given Name', 'Phone 1 - Label', 'Phone 1 - Type', 'Phone 1 - Value', 'Address 1 - Formatted', 'Notes', 'Labels', 'Group Membership'];
+    const head = ['Name', 'Given Name', 'Phone 1 - Label', 'Phone 1 - Type', 'Phone 1 - Value', 'Phone 2 - Label', 'Phone 2 - Type', 'Phone 2 - Value', 'Address 1 - Formatted', 'Notes', 'Labels', 'Group Membership'];
     const lines = [head.join(',')];
     for (const c of rows) {
       const notes = `${c.code}${c.type !== 'Individual' ? ' · ' + c.type : ''}${c.location ? ' · ' + c.location : ''} · ${c.total_orders} order${c.total_orders === 1 ? '' : 's'}${c.last_purchase_date ? ', last ' + c.last_purchase_date : ''}`;
-      lines.push([cell(c.name), cell(c.name), '"Mobile"', '"Mobile"', '"' + intl(c.phone_norm) + '"', cell(c.address), cell(notes), cell(`${label} ::: * myContacts`), cell(`${label} ::: * myContacts`)].join(','));
+      lines.push([cell(c.name), cell(c.name), '"Mobile"', '"Mobile"', '"' + intl(c.phone_norm) + '"', c.phone2_norm ? '"Mobile"' : '""', c.phone2_norm ? '"Mobile"' : '""', c.phone2_norm ? '"' + intl(c.phone2_norm) + '"' : '""', cell(c.address), cell(notes), cell(`${label} ::: * myContacts`), cell(`${label} ::: * myContacts`)].join(','));
     }
     await audit(db, req.user, 'customer', null, 'contacts_exported', null, { count: rows.length, filters: req.query });
     res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="nalla-malayalam-contacts.csv"', 'Cache-Control': 'no-store', 'X-Contact-Count': String(rows.length) });
@@ -117,7 +192,7 @@ module.exports = (app, { db }) => {
   app.get('/api/customers/lookup', requireRole(...VIEWERS), async (req, res) => {
     const key = phoneKey(req.query.phone);
     if (key.length < 7) return res.json({ customer: null });
-    const c = await db.get(`SELECT c.*, ${STATS} FROM customers c WHERE c.phone_norm = ?`, [key]);
+    const c = await db.get(`SELECT c.*, ${STATS} FROM customers c WHERE c.phone_norm = ? OR c.phone2_norm = ? ORDER BY (c.phone_norm = ?) DESC LIMIT 1`, [key, key, key]);
     res.json({ customer: c || null });
   });
 
@@ -125,9 +200,50 @@ module.exports = (app, { db }) => {
     res.json((await db.all(`SELECT location FROM customers WHERE location IS NOT NULL AND kind = 'Customer' GROUP BY location HAVING COUNT(*) >= 3 ORDER BY location`)).map(r => r.location));
   });
 
+  // What the "Update needed" tab shows besides the list: counts by reason, and the sales that have no customer record.
+  app.get('/api/customers/update-summary', requireRole(...VIEWERS), async (_req, res) => {
+    const lists = await getLists(db);
+    const counts = await db.all(`SELECT r AS reason, COUNT(*) AS n FROM customers c, unnest(${needsSql(lists.places)}) r GROUP BY r`);
+    const { n } = await db.get(`SELECT COUNT(*) AS n FROM customers c WHERE cardinality(${needsSql(lists.places)}) > 0`);
+    const total = await db.get(`SELECT COUNT(*) AS n FROM customers c WHERE c.kind = 'Customer'`);
+    const noCustomer = await db.all(`SELECT s.id, s.sale_no, s.sale_date, s.channel, s.platform, s.customer_name, s.address, s.total_amount, s.status,
+        CASE WHEN s.import_ref LIKE 'WEB-%' THEN 'Website' WHEN s.import_ref LIKE 'WA-%' THEN 'WhatsApp group' WHEN s.import_ref IS NOT NULL THEN 'Order sheet' ELSE 'Sales' END AS source
+      FROM sales s WHERE s.customer_id IS NULL AND s.status <> 'Cancelled' AND s.channel <> 'Onsite' ORDER BY s.sale_date DESC, s.id DESC LIMIT 500`);
+    const { m } = await db.get(`SELECT COUNT(*) AS m FROM sales s WHERE s.customer_id IS NULL AND s.status <> 'Cancelled' AND s.channel <> 'Onsite'`);
+    res.json({ needing: n, complete: total.n - n, reasons: Object.fromEntries(REASONS.map(r => [r, (counts.find(c => c.reason === r) || {}).n || 0])), sales_without_customer: m, sales: noCustomer });
+  });
+
+  // Possibly the same person twice: same name (letters only) and the same PIN. Pairs marked "not the same person" are left out.
+  app.get('/api/customers/duplicates', requireRole(...VIEWERS), async (_req, res) => {
+    const dismissed = new Set((await read(db, 'duplicates_dismissed')) || []);
+    const groups = (await db.all(`SELECT array_agg(id ORDER BY id) AS ids FROM (
+        SELECT c.id, lower(regexp_replace(c.name, '[^A-Za-z]', '', 'g')) AS nk, c.pin FROM customers c WHERE c.kind = 'Customer' AND c.pin ~ '^[1-9][0-9]{5}$') k
+      WHERE length(nk) >= 5 GROUP BY nk, pin HAVING COUNT(*) > 1 ORDER BY MIN(id) LIMIT 300`)).map(g => g.ids).filter(ids => !dismissed.has(ids.join('-')));
+    const ids = groups.flat();
+    const rows = ids.length ? await db.all(`SELECT c.id, c.code, c.name, c.phone, c.phone2, c.address, c.pin, c.location, c.source, c.created_at, ${STATS} FROM customers c WHERE c.id = ANY(?::int[])`, [ids]) : [];
+    const byId = new Map(rows.map(r => [r.id, r]));
+    // The record kept on a merge: the one with more orders, then the older one.
+    res.json(groups.map(g => g.map(id => byId.get(id)).sort((x, y) => y.total_orders - x.total_orders || x.id - y.id)));
+  });
+  app.post('/api/customers/duplicates/dismiss', requireRole('admin', 'manager'), async (req, res) => {
+    const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(idParam).filter(i => i > 0).sort((a, b) => a - b);
+    if (ids.length < 2) throw bad('Choose the customers that are not the same person');
+    const list = (await read(db, 'duplicates_dismissed')) || [];
+    if (!list.includes(ids.join('-'))) list.push(ids.join('-'));
+    await db.tx(async t => { await write(t, 'duplicates_dismissed', list); await audit(t, req.user, 'customer', ids[0], 'not_duplicates', null, { ids }); });
+    res.json({ ok: true });
+  });
+  // Merge: the customer in the URL is kept; `other_id` is folded into it. Admin only, with a reason.
+  app.post('/api/customers/:id/merge', requireRole('admin'), async (req, res) => {
+    const keepId = idParam(req.params.id); const otherId = idParam(req.body.other_id);
+    const reason = str(req.body.reason, { name: 'Reason', max: 300 }) || 'Same person, two records';
+    const r = await db.tx(t => mergeCustomers(t, keepId, otherId, req.user, reason));
+    res.json(r);
+  });
+
   // Profile with the full purchase and payment history.
   app.get('/api/customers/:id', requireRole(...VIEWERS), async (req, res) => {
-    const c = await db.get(`SELECT c.*, ${STATS} FROM customers c WHERE c.id = ?`, [idParam(req.params.id)]);
+    const c = await db.get(`SELECT c.*, ${STATS}, ${needsSql((await getLists(db)).places)} AS needs FROM customers c WHERE c.id = ?`, [idParam(req.params.id)]);
     if (!c) throw notFound('Customer');
     const sales = await db.all(`SELECT s.id, s.sale_no, s.sale_date, s.channel, s.status, s.total_amount, s.amount_received,
         (s.total_amount - s.amount_received) AS balance, s.payment_status, s.due_date, u.name AS salesperson_name
@@ -146,7 +262,7 @@ module.exports = (app, { db }) => {
   });
 
   app.patch('/api/customers/:id', requireRole(...VIEWERS), async (req, res) => {
-    const before = await db.get('SELECT id, name, phone, phone_norm, address, location, type, contact_person FROM customers WHERE id = ?', [idParam(req.params.id)]);
+    const before = await db.get('SELECT id, name, phone, phone_norm, phone2, phone2_norm, address, location, state, pin, type, contact_person, name_ok FROM customers WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Customer');
     const b = req.body; const next = { ...before };
     if (b.name !== undefined) next.name = str(b.name, { required: true, name: 'Customer name', max: 150 });
@@ -158,19 +274,35 @@ module.exports = (app, { db }) => {
       next.phone = str(b.phone, { required: !lists.places.includes(next.type), name: 'Contact number', max: 30 });
       next.phone_norm = next.phone ? validPhone(next.phone) : null;
     }
+    if (b.phone2 !== undefined) {
+      next.phone2 = str(b.phone2, { name: 'Second number', max: 30 });
+      next.phone2_norm = next.phone2 ? validPhone(next.phone2, 'Second number') : null;
+      if (next.phone2_norm && next.phone2_norm === next.phone_norm) { next.phone2 = null; next.phone2_norm = null; }
+    }
+    if (b.pin !== undefined) { next.pin = str(b.pin, { name: 'PIN', max: 10 }); if (next.pin) { next.pin = next.pin.replace(/\s/g, ''); if (!/^[1-9][0-9]{5}$/.test(next.pin)) throw bad('PIN must be 6 digits', { field: 'PIN' }); } }
+    // "This name is correct": the name is no longer flagged for a check. Changing the name clears it again.
+    if (b.name_ok !== undefined) next.name_ok = b.name_ok ? 1 : 0;
+    if (b.name !== undefined && next.name !== before.name && b.name_ok === undefined) next.name_ok = 0;
     if (b.address !== undefined) next.address = str(b.address, { name: 'Address', max: 500 });
-    if (b.location !== undefined) next.location = str(b.location, { name: 'Location', max: 100 });
-    if (next.phone_norm && next.phone_norm !== before.phone_norm && await db.get('SELECT 1 AS x FROM customers WHERE phone_norm = ? AND id <> ?', [next.phone_norm, before.id])) {
-      throw conflict('Another customer already has this contact number', { field: 'Contact number' });
+    if (b.location !== undefined) next.location = str(b.location, { name: 'District', max: 100 });
+    if (b.state !== undefined) next.state = str(b.state, { name: 'State', max: 60 });
+    for (const [key, field] of [[next.phone_norm, 'Contact number'], [next.phone2_norm, 'Second number']]) {
+      if (key && await db.get('SELECT 1 AS x FROM customers WHERE (phone_norm = ? OR phone2_norm = ?) AND id <> ?', [key, key, before.id])) {
+        throw conflict(`Another customer already has this number (${field.toLowerCase()}). If it is the same person, merge the two records from Update needed → Possible duplicates.`, { field });
+      }
     }
     await db.tx(async t => {
-      await t.run(`UPDATE customers SET name = ?, phone = ?, phone_norm = ?, address = ?, location = ?, type = ?, contact_person = ?, updated_at = now_iso() WHERE id = ?`,
-        [next.name, next.phone, next.phone_norm, next.address, next.location, next.type, next.contact_person, before.id]);
+      await t.run(`UPDATE customers SET name = ?, phone = ?, phone_norm = ?, phone2 = ?, phone2_norm = ?, address = ?, location = ?, state = ?, pin = ?, type = ?, contact_person = ?, name_ok = ?, updated_at = now_iso() WHERE id = ?`,
+        [next.name, next.phone, next.phone_norm, next.phone2, next.phone2_norm, next.address, next.location, next.state, next.pin, next.type, next.contact_person, next.name_ok, before.id]);
       await audit(t, req.user, 'customer', before.id, 'updated', before, next);
     });
     res.json(await db.get(`SELECT c.*, ${STATS} FROM customers c WHERE c.id = ?`, [before.id]));
   });
 };
 module.exports.findOrCreateCustomer = findOrCreateCustomer;
+module.exports.mergeCustomers = mergeCustomers;
+module.exports.needsSql = needsSql;
+module.exports.SOURCES = SOURCES;
+module.exports.REASONS = REASONS;
 module.exports.phoneKey = phoneKey;
 module.exports.CUSTOMER_TYPES = TYPES;

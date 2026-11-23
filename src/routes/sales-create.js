@@ -6,6 +6,8 @@ const { moveStock, saleStock } = require('../stock');
 const { findOrCreateCustomer, CUSTOMER_TYPES } = require('./customers');
 const { resolveLocation, recordVisit, readLocation } = require('./visits');
 const { getLists } = require('../settings');
+
+const MAX_CHARGE = 10000;
 const { bad, forbidden, conflict, str, int, money, date, oneOf, bool, idParam, today, inr } = require('../util');
 
 module.exports = (app, { db, load }) => {
@@ -42,8 +44,9 @@ module.exports = (app, { db, load }) => {
       // The school or bookstore: picked from the saved list, or typed in for a new one.
       loc = await readLocation(db, b);
       f.location_type = loc.type; f.location_name = loc.name; f.contact_person = loc.contact_person;
-      f.next_visit_date = date(b.next_visit_date, { name: 'Next visit date' });
-      handedOver = b.handed_over === undefined ? true : bool(b.handed_over);
+      // An exhibition sale is handed over on the spot and has no next visit.
+      f.next_visit_date = loc.type === 'Exhibition' ? null : date(b.next_visit_date, { name: 'Next visit date' });
+      handedOver = loc.type === 'Exhibition' || b.handed_over === undefined ? true : bool(b.handed_over);
       if (f.location_type !== 'Exhibition') defaultType = f.location_type;
     }
     const tele = channel === 'Tele-sales';
@@ -53,7 +56,10 @@ module.exports = (app, { db, load }) => {
     const buyerName = str(b.customer_name, { name: 'Customer name', max: 150 });
     const customerName = (loc && loc.type !== 'Exhibition' ? null : buyerName) || f.location_name;
     if (!customerName) throw bad('Customer name is required', { field: 'Customer name' });
-    const location = str(b.location, { name: 'Location', max: 100 });
+    const location = str(b.location, { name: 'District', max: 100 });
+    const state = str(b.state, { name: 'State', max: 60 });
+    const pin = (str(b.pin, { name: 'PIN', max: 10 }) || '').replace(/\s/g, '') || null;
+    if (pin && !/^[1-9][0-9]{5}$/.test(pin)) throw bad('PIN must be 6 digits', { field: 'PIN' });
     const customerType = oneOf(b.customer_type, lists.customer_types, { name: 'Customer type' }) || defaultType;
 
     // Items: every book comes from the Book Master, once per sale.
@@ -76,7 +82,11 @@ module.exports = (app, { db, load }) => {
       if (it.unit_price === null) it.unit_price = bk.price;
       it.line_total = it.qty * it.unit_price;
     }
-    const total = items.reduce((s, i) => s + i.line_total, 0);
+    const booksTotal = items.reduce((s, i) => s + i.line_total, 0);
+    // Delivery and COD charges are added to an order that is sent out (not to an onsite or exhibition sale).
+    const delivery = channel === 'Onsite' ? 0 : money(b.delivery_charge, { name: 'Delivery charge', max: MAX_CHARGE }) ?? 0;
+    const cod = channel === 'Onsite' ? 0 : money(b.cod_charge, { name: 'COD charge', max: MAX_CHARGE }) ?? 0;
+    const total = booksTotal + delivery + cod;
 
     const recvName = channel === 'Onsite' ? 'Advance payment' : 'Amount received';
     const method = oneOf(b.payment_method, lists.payment_methods, { name: 'Payment method' });
@@ -84,9 +94,11 @@ module.exports = (app, { db, load }) => {
     if (received > total) throw bad(`${recvName} ${inr(received)} is more than the total ${inr(total)}`, { field: recvName });
     if (received > 0 && !method) throw bad(`Choose the payment method for the ${recvName.toLowerCase()}`, { field: 'Payment method' });
     if (received > 0 && method === 'COD') throw bad(`A COD order is paid on delivery. Leave ${recvName} at 0 and record the payment when the money arrives.`, { field: recvName });
+    if (cod > 0 && method !== 'COD') throw bad('A COD charge applies only when the payment method is COD', { field: 'COD charge' });
+    const exhibition = !!loc && loc.type === 'Exhibition';
     const dueDate = date(b.due_date, { name: 'Due date' });
     // A school or shop that still owes money must have a date to pay by.
-    if (channel === 'Onsite' && total - received > 0 && !dueDate) throw bad(`Give the due date for the ${inr(total - received)} still to be paid`, { field: 'Due date' });
+    if (channel === 'Onsite' && !exhibition && total - received > 0 && !dueDate) throw bad(`Give the due date for the ${inr(total - received)} still to be paid`, { field: 'Due date' });
     const remarks = str(b.remarks, { name: 'Remarks', max: 1000 });
     const status = handedOver ? 'Completed' : 'Confirmed';
 
@@ -102,15 +114,15 @@ module.exports = (app, { db, load }) => {
         let cust = null;
         if (loc && loc.type !== 'Exhibition') cust = { id: await resolveLocation(t, { id: loc.id, type: loc.type, name: loc.name, phone, address, contact_person: loc.contact_person }) };
         else if (loc) cust = phone && buyerName ? await findOrCreateCustomer(t, { name: buyerName, phone, type: 'Individual' }) : null; // exhibition walk-in
-        else if (phone) cust = await findOrCreateCustomer(t, { name: customerName, phone, address, location, type: customerType });
+        else if (phone) cust = await findOrCreateCustomer(t, { name: customerName, phone, address, location, state, pin, type: customerType });
         const { n } = await t.get(`SELECT nextval('sale_number_seq') AS n`);
         const s = await t.get(`INSERT INTO sales (sale_no, sale_date, channel, salesperson_id, customer_id, customer_name, customer_phone, address,
             platform, platform_order_id, location_type, location_name, contact_person, next_visit_date, status,
-            total_amount, amount_received, payment_method, payment_status, due_date, remarks, request_key, created_by)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id, sale_no`,
+            total_amount, amount_received, payment_method, payment_status, due_date, remarks, request_key, created_by, delivery_charge, cod_charge)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id, sale_no`,
         ['S-' + String(n).padStart(6, '0'), saleDate, channel, salespersonId, cust ? cust.id : null, customerName, phone, address,
           f.platform, f.platform_order_id, f.location_type, f.location_name, f.contact_person, f.next_visit_date, status,
-          total, received, method, paymentStatus(total, received, method), dueDate, remarks, requestKey, me.id]);
+          total, received, method, paymentStatus(total, received, method), dueDate, remarks, requestKey, me.id, delivery, cod]);
         // Lock books in a fixed order so two sales of the same books cannot deadlock.
         for (const it of items) {
           await t.run('INSERT INTO sale_items (sale_id, book_id, qty, unit_price, line_total) VALUES (?,?,?,?,?)', [s.id, it.book_id, it.qty, it.unit_price, it.line_total]);
@@ -127,7 +139,8 @@ module.exports = (app, { db, load }) => {
             [s.id, received, method, saleDate, channel === 'Onsite' ? 'Advance payment' : 'Received with the order', me.id]);
         }
         // An onsite sale is also a visit: it appears in the visit list and completes any visit that was due.
-        if (loc) await recordVisit(t, { visit_date: saleDate, salesperson_id: salespersonId, customer_id: loc.type === 'Exhibition' ? null : cust.id, location_type: loc.type, location_name: loc.name,
+        // (An exhibition is a sale only: it is not a visit to a school or bookstore.)
+        if (loc && !exhibition) await recordVisit(t, { visit_date: saleDate, salesperson_id: salespersonId, customer_id: loc.type === 'Exhibition' ? null : cust.id, location_type: loc.type, location_name: loc.name,
           address, contact_person: loc.contact_person, contact_phone: phone, outcome: handedOver ? 'Sale' : 'Order taken', remarks, next_visit_date: f.next_visit_date, sale_id: s.id, created_by: me.id });
         await audit(t, me, 'sale', s.id, 'created', null, { sale_no: s.sale_no, channel, total_amount: total, amount_received: received, status, new_customer: !!(cust && cust.created) });
         return s.id;

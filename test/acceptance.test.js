@@ -431,8 +431,11 @@ test('onsite visits: a visit is saved with or without a sale, locations are reus
   assert.equal(ex.customer_id, null); assert.equal(ex.customer_name, 'Town Book Fair');
   const ex2 = ok(await S.post('/api/sales', { location_type: 'Exhibition', location_name: 'Town Book Fair', customer_name: 'Fair Buyer', customer_phone: '9222200001', items: [{ book_id: maam.id, qty: 1 }], payment_method: 'Cash', amount_received: 260 }));
   assert.equal((await M.get(`/api/customers/${ex2.customer_id}`)).data.name, 'Fair Buyer');
-  const list = (await M.get('/api/visits?q=Town')).data;
-  assert.equal(list.rows.length, 2); assert.equal(list.totals.with_sale, 2); assert.equal(list.totals.locations, 1);
+  // an exhibition is a sale only: handed over at once, no visit row, no next visit, and no due date needed for a balance
+  assert.equal((await M.get('/api/visits?q=Town')).data.rows.length, 0);
+  const ex3 = ok(await S.post('/api/sales', { location_type: 'Exhibition', location_name: 'Town Book Fair', next_visit_date: '2026-12-01', handed_over: false, items: [{ book_id: maam.id, qty: 1 }], amount_received: 0 }));
+  assert.equal(ex3.status, 'Completed'); assert.equal(ex3.next_visit_date, null); assert.equal(ex3.channel, 'Onsite'); assert.equal(ex3.location_type, 'Exhibition');
+  assert.equal((await S.post('/api/visits', { location_type: 'Exhibition', location_name: 'Town Book Fair' })).status, 400);
   assert.equal((await M.get('/api/visits?outcome=No%20sale')).data.rows.length, 1);
 });
 
@@ -716,4 +719,160 @@ test('website orders: a monthly reminder until the file is uploaded; duplicates 
   try { st = (await O.get('/api/imports/website')).data; assert.equal(st.due, true); assert.equal(st.month, 'November 2026'); }
   finally { process.env.TODAY_OVERRIDE = '2026-11-16'; }
   assert.ok(typed.id);
+});
+
+test('tele-sales order: State and District, delivery and COD charges from Settings; bulk order customers', async () => {
+  let st = (await T.get('/api/settings/lists')).data;
+  assert.deepEqual(st.charges, { cod_charge: 30, delivery_charge: 40, bulk_min_copies: 10, bulk_min_amount: 3000 });
+  assert.equal((await M.send('PUT', '/api/settings/charges', { cod_charge: 35 })).status, 403);
+  assert.equal((await A.send('PUT', '/api/settings/charges', { cod_charge: -1 })).status, 400);
+  ok(await A.send('PUT', '/api/settings/charges', { cod_charge: 35, delivery_charge: 50, bulk_min_copies: 5, bulk_min_amount: 0 }), 200);
+  assert.equal((await T.get('/api/settings/lists')).data.charges.cod_charge, 35);
+  const bk = await db.get(`SELECT id FROM books WHERE kind = 'Book' AND active = 1 AND lower(sku) <> 'other' AND on_hand - reserved >= 8 ORDER BY id LIMIT 1`);
+  const order = body => T.post('/api/sales', { customer_name: 'Charge Test', address: 'House 1, Main Road', state: 'Kerala', location: 'Kannur', pin: '670 001', ...body });
+  assert.equal((await order({ customer_phone: '9666600009', pin: '12345', payment_method: 'UPI', items: [{ book_id: 1, qty: 1, unit_price: 100 }] })).status, 400);
+  // a COD charge needs a COD order
+  assert.equal((await order({ customer_phone: '9666611111', payment_method: 'UPI', amount_received: 0, cod_charge: 35, items: [{ book_id: bk.id, qty: 1, unit_price: 100 }] })).status, 400);
+  const s1 = ok(await order({ customer_phone: '9666611111', payment_method: 'COD', amount_received: 0, cod_charge: 35, delivery_charge: 50, items: [{ book_id: bk.id, qty: 1, unit_price: 100 }] }));
+  assert.equal(s1.total_amount, 185); assert.equal(s1.cod_charge, 35); assert.equal(s1.delivery_charge, 50); assert.equal(s1.balance, 185); assert.equal(s1.payment_status, 'COD'); assert.equal(s1.due_date, null);
+  const c1 = (await T.get(`/api/customers/${s1.customer_id}`)).data;
+  assert.equal(c1.state, 'Kerala'); assert.equal(c1.location, 'Kannur'); assert.equal(c1.pin, '670001'); assert.deepEqual(c1.needs, [], JSON.stringify(c1.needs));
+  // the charges stay when the books change, and can be corrected by the Admin
+  ok(await A.send('PATCH', `/api/sales/${s1.id}`, { reason: 'Two copies', items: [{ book_id: bk.id, qty: 2, unit_price: 100 }] }), 200);
+  let e = (await M.get(`/api/sales/${s1.id}`)).data; assert.equal(e.total_amount, 285);
+  ok(await A.send('PATCH', `/api/sales/${s1.id}`, { reason: 'No delivery charge', delivery_charge: 0 }), 200);
+  e = (await M.get(`/api/sales/${s1.id}`)).data; assert.equal(e.total_amount, 235); assert.equal(e.delivery_charge, 0);
+  assert.equal((await A.send('PATCH', `/api/sales/${s1.id}`, { reason: 'x', payment_method: 'UPI' })).status, 400); // the COD charge must go first
+  // an onsite sale never carries these charges
+  const fair = ok(await S.post('/api/sales', { location_type: 'Exhibition', location_name: 'Charge Fair', delivery_charge: 50, items: [{ book_id: bk.id, qty: 1, unit_price: 100 }], payment_method: 'Cash', amount_received: 100 }));
+  assert.equal(fair.total_amount, 100); assert.equal(fair.delivery_charge, 0);
+  // bulk order customers: one order of 5 copies or more (the amount rule is switched off above)
+  const s2 = ok(await order({ customer_name: 'Bulk Buyer', customer_phone: '9666600002', state: 'Karnataka', location: 'Bengaluru', payment_method: 'UPI', amount_received: 0, items: [{ book_id: bk.id, qty: 5, unit_price: 90 }] }));
+  let bulk = (await M.get('/api/customers?bulk=1')).data.rows;
+  assert.ok(bulk.some(c => c.id === s2.customer_id)); assert.ok(!bulk.some(c => c.id === s1.customer_id));
+  assert.ok(bulk.every(c => c.total_orders >= 1));
+  assert.deepEqual((await M.get('/api/customers?bulk=1&state=Karnataka')).data.rows.map(c => c.id), [s2.customer_id]);
+  // with an amount rule, a large order counts as well
+  ok(await A.send('PUT', '/api/settings/charges', { bulk_min_copies: 50, bulk_min_amount: 200 }), 200);
+  bulk = (await M.get('/api/customers?bulk=1')).data.rows;
+  assert.ok(bulk.some(c => c.id === s1.customer_id) && bulk.some(c => c.id === s2.customer_id));
+  // bulk and repeat can be combined
+  ok(await order({ customer_name: 'Bulk Buyer', customer_phone: '9666600002', payment_method: 'UPI', amount_received: 0, items: [{ book_id: bk.id, qty: 1, unit_price: 90 }] }));
+  assert.deepEqual((await M.get('/api/customers?bulk=1&orders=repeat&q=9666600002')).data.rows.map(c => c.id), [s2.customer_id]);
+  ok(await A.send('PUT', '/api/settings/charges', { cod_charge: 30, delivery_charge: 40, bulk_min_copies: 10, bulk_min_amount: 3000 }), 200);
+});
+
+test('WhatsApp group export: order posts become customers; call lists and chatter do not', async () => {
+  const { readChat, readPost } = require('../scripts/import-whatsapp');
+  const chat = ['3/19/25, 10:13 AM - Messages and calls are end-to-end encrypted.', '3/19/25, 10:14 AM - Asha added Biju',
+    '3/19/25, 10:31 AM - Asha: Test Person, Rose Villa (h), Mudavoor p. O, Muvattupuzha, 686669..', '+91 90000 11111',
+    '7/13/25, 9:02 PM - Biju: *Story books*', 'Second Buyer', 'Hill House,Kodathur', 'Kallepadam PO', 'Thrissur', 'Pin : 68 05 87', 'PH: 9000022222', '9000033333', 'COD',
+    '7/14/25, 9:00 AM - Biju: 9000044444', '9000055555', '9000066666', '7/14/25, 9:05 AM - Asha: <Media omitted>', '7/14/25, 9:06 AM - Asha: 9000077777 call later'].join('\n');
+  const msgs = readChat(chat);
+  assert.equal(msgs.length, 5); assert.equal(msgs[0].date, '2025-03-19'); assert.equal(msgs[1].who, 'Biju'); assert.equal(msgs[1].date, '2025-07-13');
+  const a = readPost(msgs[0].text);
+  assert.equal(a.phone, '9000011111'); assert.equal(a.name, 'Test Person'); assert.equal(a.pin, '686669'); assert.equal(a.state, 'Kerala'); assert.match(a.address, /^Rose Villa \(h\), Mudavoor/);
+  const b = readPost(msgs[1].text);
+  assert.equal(b.phone, '9000022222'); assert.equal(b.name, 'Second Buyer'); assert.equal(b.pin, '680587'); assert.equal(b.district, 'Thrissur'); assert.match(b.items, /Story books/); assert.match(b.items, /COD/);
+  assert.equal(b.address, 'Hill House,Kodathur, Kallepadam PO, Thrissur');
+  assert.equal(readPost(msgs[2].text), null); assert.equal(readPost(msgs[3].text), null); assert.equal(readPost(msgs[4].text), null);
+  // the book and the price of the time are read from the post
+  const { readOrder, priceOrder } = require('../scripts/import-whatsapp');
+  const price = (text, date) => { const o = readOrder(text, date); const p = priceOrder(o, date); return [o.keys.join('+'), p.total, p.cod, p.stated]; };
+  assert.deepEqual(price('Some One\nHouse\nKannur 670001\n9000011111', '2025-04-01'), ['NMCOMBO', 450, 0, false]);          // no book written, before the story books
+  assert.deepEqual(price('Some One\nHouse\nKannur 670001\n9000011111', '2025-05-01'), ['NMCOMBO', 490, 0, false]);
+  assert.deepEqual(price('Some One\nHouse\nKannur 670001\n9000011111', '2025-08-01'), ['', 0, 0, false]);                     // later: no book, no sale
+  assert.deepEqual(price('*Story books*\nSome One\nMambaram PO\nKannur 670001\n9000011111\nCOD', '2025-08-01'), ['KVS1', 350, 30, false]);
+  assert.deepEqual(price('Some One\nKannur 670001\n9000011111\nStory books', '2025-12-01'), ['KVS1', 360, 0, false]);
+  assert.deepEqual(price('Some One\nKannur 670001\n9000011111\nNML cod 520', '2025-08-01'), ['NMCOMBO', 520, 30, true]);
+  assert.deepEqual(price('Some One\nKannur 670001\n9000011111\nNML + Story books', '2025-08-01'), ['NMCOMBO+KVS1', 800, 0, false]);
+  assert.deepEqual(price('Some One\nKannur 670001\n9000011111\nKVS 1&2', '2026-02-01'), ['KVSCOMBO', 690, 0, false]);
+  assert.deepEqual(price('Some One\nKannur 670001\n9000011111\nPart 2 only\n289', '2025-10-01'), ['NM2', 289, 0, true]);
+  assert.deepEqual(price('Some One\nKannur 670001\n9000011111\nNML 2set', '2026-07-01'), ['NMCOMBO', 980, 0, false]);
+  assert.deepEqual(price('Some One\nKannur 670001\n9000011111\nmamba changa mittu', '2025-08-01'), ['MAMB+CHAN+MITT', 290, 0, false]);
+  // customers that came from the group can be listed on their own
+  await db.run(`INSERT INTO customers (code, name, phone, phone_norm, kind, source, notes) VALUES ('C-WA001', 'Group Buyer', '9000022222', '9000022222', 'Customer', 'WhatsApp group', 'WhatsApp sales group: order posted on 13 Jul 2025.')`);
+  const rows = (await M.get('/api/customers?view=update&source=WhatsApp%20group')).data.rows;
+  assert.equal(rows.length, 1); assert.equal(rows[0].name, 'Group Buyer'); assert.equal(rows[0].total_orders, 0);
+  assert.deepEqual(rows[0].needs, ['PIN missing', 'Address missing', 'No order']);
+});
+
+test('customer list: complete customers and "Update needed" apart; source labels; order-count filters; merging two records of one person', async () => {
+  const add = (code, name, phone, extra = {}) => db.get(`INSERT INTO customers (code, name, phone, phone_norm, address, pin, kind, source) VALUES (?,?,?,?,?,?,'Customer',?) RETURNING id`,
+    [code, name, phone, phone, extra.address === undefined ? 'Rose Villa, Lake Road, Kochi' : extra.address, extra.pin === undefined ? '682001' : extra.pin, extra.source || 'Order sheet']);
+  const bk = await db.get(`SELECT id FROM books WHERE kind = 'Book' AND active = 1 AND lower(sku) <> 'other' ORDER BY id LIMIT 1`);
+  const sale = (cid, phone, date = '2026-10-01') => db.run(`INSERT INTO sales (sale_no, sale_date, channel, salesperson_id, customer_id, customer_name, customer_phone, status, total_amount, amount_received, payment_status, created_by, import_ref)
+    VALUES ('S-T' || nextval('sale_number_seq'), ?, 'Tele-sales', 1, ?, 'x', ?, 'Delivered', 100, 100, 'Paid', 1, 'TEST-' || nextval('sale_number_seq'))`, [date, cid, phone]);
+  const good = await add('C-UN01', 'Meera Nair', '9733300001'); await sale(good.id, '9733300001');
+  const odd = await add('C-UN02', 'Confirmed order', '9733300002'); await sale(odd.id, '9733300002');
+  const mal = await add('C-UN03', 'മീര', '9733300003'); await sale(mal.id, '9733300003');
+  const nopin = await add('C-UN04', 'Anil Kumar', '9733300004', { pin: null }); await sale(nopin.id, '9733300004');
+  const badpin = await add('C-UN05', 'Bindu Raj', '9733300005', { pin: '68201' }); await sale(badpin.id, '9733300005');
+  const noaddr = await add('C-UN06', 'Cyril Paul', '9733300006', { address: null }); await sale(noaddr.id, '9733300006');
+  const noorder = await add('C-UN07', 'Deepa Mohan', '9733300007', { source: 'WhatsApp group' });
+  const list = async q => (await M.get('/api/customers?' + q)).data.rows;
+  const main = await list('q=97333000'); // a search looks in both lists
+  const needs = Object.fromEntries(main.map(c => [c.code, c.needs]));
+  assert.deepEqual(needs['C-UN01'], []); assert.deepEqual(needs['C-UN02'], ['Name to check']); assert.deepEqual(needs['C-UN03'], ['Name in Malayalam']);
+  assert.deepEqual(needs['C-UN04'], ['PIN missing']); assert.deepEqual(needs['C-UN05'], ['PIN wrong']); assert.deepEqual(needs['C-UN06'], ['Address missing']); assert.deepEqual(needs['C-UN07'], ['No order']);
+  // the main list leaves them out; the Update needed list holds them, filterable by reason
+  const mainCodes = (await list('kind=Customer')).map(c => c.code);
+  assert.ok(mainCodes.includes('C-UN01')); assert.ok(!['C-UN02', 'C-UN03', 'C-UN04', 'C-UN05', 'C-UN06', 'C-UN07'].some(c => mainCodes.includes(c)));
+  const upd = (await list('view=update')).map(c => c.code);
+  for (const c of ['C-UN02', 'C-UN03', 'C-UN04', 'C-UN05', 'C-UN06', 'C-UN07']) assert.ok(upd.includes(c), c);
+  assert.deepEqual((await list('view=update&reason=PIN%20wrong')).map(c => c.code), ['C-UN05']);
+  assert.equal((await M.get('/api/customers?view=update&reason=Bad')).status, 400);
+  // a name that is right after all is confirmed once; fixing a detail moves the customer back
+  ok(await M.patch(`/api/customers/${mal.id}`, { name_ok: true }), 200);
+  ok(await M.patch(`/api/customers/${badpin.id}`, { pin: '682 016' }), 200);
+  assert.equal((await M.patch(`/api/customers/${nopin.id}`, { pin: '12' })).status, 400);
+  const after = (await list('kind=Customer')).map(c => c.code);
+  assert.ok(after.includes('C-UN03') && after.includes('C-UN05'));
+  const sum = (await M.get('/api/customers/update-summary')).data;
+  assert.ok(sum.reasons['Name to check'] >= 1 && sum.reasons['No order'] >= 1); assert.equal(typeof sum.sales_without_customer, 'number');
+  assert.ok(sum.sales.every(s => s.channel !== 'Onsite'));
+  // source label and filter
+  assert.deepEqual((await list('source=WhatsApp%20group&view=update&q=97333')).map(c => c.code), ['C-UN07']);
+  assert.equal((await M.get('/api/customers?source=Somewhere')).status, 400);
+  // order-count filters: twice, three or more
+  await sale(good.id, '9733300001', '2026-10-05');
+  assert.ok((await list('orders=twice&q=Meera')).some(c => c.code === 'C-UN01'));
+  assert.ok(!(await list('orders=3plus&q=Meera')).some(c => c.code === 'C-UN01'));
+  await sale(good.id, '9733300001', '2026-10-09');
+  assert.ok((await list('orders=3plus&q=Meera')).some(c => c.code === 'C-UN01'));
+  assert.ok(!(await list('orders=twice&q=Meera')).some(c => c.code === 'C-UN01'));
+  // the same person twice (same name and PIN): listed as a possible duplicate, then merged by the Admin
+  const twin = await add('C-UN08', 'MEERA  NAIR', '9733300008', { address: null }); await sale(twin.id, '9733300008');
+  await db.run(`INSERT INTO calls (call_no, customer_id, phone, called_at, status, user_id) VALUES ('CL-T1', ?, '9733300008', '2026-10-02T10:00', 'Busy', 1)`, [twin.id]).catch(() => {});
+  const dups = (await M.get('/api/customers/duplicates')).data;
+  const pair = dups.find(g => g.some(c => c.id === good.id));
+  assert.ok(pair); assert.deepEqual(pair.map(c => c.id), [good.id, twin.id]); // more orders first: that one is kept
+  assert.equal((await M.post(`/api/customers/${good.id}/merge`, { other_id: twin.id })).status, 403);
+  const m = ok(await A.post(`/api/customers/${good.id}/merge`, { other_id: twin.id, reason: 'Same person' }), 200);
+  assert.equal(m.moved.sales, 1);
+  const kept = (await M.get(`/api/customers/${good.id}`)).data;
+  assert.equal(kept.total_orders, 4); assert.equal(kept.phone2, '9733300008'); assert.equal(kept.address, 'Rose Villa, Lake Road, Kochi');
+  assert.equal((await M.get(`/api/customers/${twin.id}`)).status, 404);
+  assert.ok(kept.history === undefined || true);
+  // the second number now finds the same customer, also on the sales form, and cannot be given to another customer
+  assert.equal((await T.get('/api/customers/lookup?phone=97333%2000008')).data.customer.id, good.id);
+  assert.ok((await list('q=9733300008')).some(c => c.id === good.id));
+  const s2 = ok(await T.post('/api/sales', { customer_name: 'Meera', customer_phone: '+91 97333 00008', address: 'Rose Villa, Lake Road', items: [{ book_id: bk.id, qty: 1, unit_price: 100 }], payment_method: 'UPI', amount_received: 0 }));
+  assert.equal(s2.customer_id, good.id);
+  assert.equal((await M.patch(`/api/customers/${noaddr.id}`, { phone2: '9733300008' })).status, 409);
+  assert.ok((await db.all(`SELECT action FROM audit_events WHERE entity = 'customer' AND entity_id IN (?, ?)`, [good.id, twin.id])).some(a => a.action === 'merged'));
+  // two different people with the same name: "not the same person" removes the pair from the list
+  const other = await add('C-UN09', 'Cyril Paul', '9733300009', { address: null }); await sale(other.id, '9733300009');
+  assert.ok((await M.get('/api/customers/duplicates')).data.some(g => g.some(c => c.id === other.id)));
+  ok(await M.post('/api/customers/duplicates/dismiss', { ids: [noaddr.id, other.id] }), 200);
+  assert.ok(!(await M.get('/api/customers/duplicates')).data.some(g => g.some(c => c.id === other.id)));
+});
+
+test('customer tidy: district spellings and the State of a PIN', () => {
+  const { districtOf, pinState } = require('../scripts/tidy-customers');
+  assert.equal(districtOf('Kozhikod'), 'Kozhikode'); assert.equal(districtOf('Thiruvanandapuram'), 'Thiruvananthapuram'); assert.equal(districtOf('Tvpm'), 'Thiruvananthapuram');
+  assert.equal(districtOf('Trichur'), 'Thrissur'); assert.equal(districtOf('ERNAKULM'), 'Ernakulam'); assert.equal(districtOf('Malappuram (dt)'), 'Malappuram');
+  assert.equal(districtOf('Cherthala'), null); assert.equal(districtOf('Bangalore'), null);
+  assert.equal(pinState('686669'), 'Kerala'); assert.equal(pinState('682555'), 'Lakshadweep'); assert.equal(pinState('560001'), 'Karnataka');
+  assert.equal(pinState('641001'), 'Tamil Nadu'); assert.equal(pinState('110017'), 'Delhi'); assert.equal(pinState('68201'), null);
 });

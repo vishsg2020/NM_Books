@@ -6,7 +6,13 @@ const S = require('../settings');
 module.exports = (app, { db }) => {
   // Everyone signed in needs the lists to fill the forms.
   app.get('/api/settings/lists', async (_req, res) => {
-    res.json({ lists: await S.getLists(db), locked: S.LOCKED, names: S.LIST_NAMES });
+    res.json({ lists: await S.getLists(db), locked: S.LOCKED, names: S.LIST_NAMES, charges: await S.getCharges(db) });
+  });
+
+  app.put('/api/settings/charges', requireRole('admin'), async (req, res) => {
+    const before = await S.getCharges(db); const next = S.cleanCharges(req.body, before);
+    await db.tx(async t => { await S.write(t, 'charges', next); await audit(t, req.user, 'settings', null, 'charges_changed', before, next); });
+    res.json(next);
   });
 
   app.put('/api/settings/lists', requireRole('admin'), async (req, res) => {
