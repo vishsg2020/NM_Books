@@ -1,6 +1,6 @@
 // Dispatch report: books and sets sent out, by day or month. Replaces the "Daily Dispatch - Report" Google Form:
 // days before the app come from the imported form answers, later days from orders moved to "Dispatched".
-import { api, get, esc, html, raw, fmtDate, fmtMonth, table, options, parseHash, formData, qs, todayLocal, drawer, onSubmit, toast } from '../core.js';
+import { api, get, esc, html, raw, fmtDate, fmtMonth, table, options, parseHash, formData, qs, todayLocal, drawer, onSubmit, toast, canEdit } from '../core.js';
 import { columnChart, barList } from '../charts.js';
 
 const RANGES = [['month', 'This month'], ['3m', 'Last 3 months'], ['12m', 'Last 12 months'], ['all', 'All time'], ['custom', 'Custom dates']];
@@ -18,7 +18,7 @@ export async function render(page, { query }) {
   const source = [mn ? `${n(mn.qty)} from daily reports entered here` : '', f ? `${n(f.qty)} from the old dispatch form (${fmtDate(f.first_day)} to ${fmtDate(f.last_day)})` : '', a ? `${n(a.qty)} from orders dispatched in this app` : ''].filter(Boolean).join(' and ');
   const chartRows = [...d.rows].reverse().map(r => ({ label: group === 'month' ? fmtMonth(r.period).slice(0, 3) : String(Number(r.period.slice(8))), sub: group === 'month' ? r.period.slice(0, 4) : '', value: r.total, tip: `${label(r.period)}: ${n(r.total)} books and sets` }));
   page.innerHTML = html`<div class="page-head"><div><h1>Dispatch report</h1><div class="sub">Books and sets sent out, by ${group}. A set counts as one.</div></div>
-      <div class="btn-row"><button class="btn primary" type="button" id="dp-add">Add daily report</button></div></div>
+      ${raw(canEdit('dispatch') ? '<div class="btn-row"><button class="btn primary" type="button" id="dp-add">Add daily report</button></div>' : '')}</div>
     <form class="filters" id="dp-filters">
       <div class="field"><label for="dp-r">Period</label><select id="dp-r" name="range">${raw(options(RANGES, range))}</select></div>
       ${raw(range === 'custom' ? `<div class="field"><label for="dp-f">From</label><input id="dp-f" name="date_from" type="date" value="${esc(from)}"></div><div class="field"><label for="dp-t">To</label><input id="dp-t" name="date_to" type="date" value="${esc(to)}"></div>` : '')}
@@ -46,13 +46,13 @@ export async function render(page, { query }) {
         return det.length ? `${n(v)}<span class="sub">${esc(det.map(x => `${x.name} ${x.qty}`).join(', '))}</span>` : n(v);
       } })),
       { label: 'Total', cls: 'num', cell: r => `<strong>${n(r.total)}</strong>` },
-      ...(group === 'day' ? [{ label: 'Actions', cls: 'cell-actions', cell: r => `<button class="btn small" type="button" data-day="${esc(r.period)}">Edit</button>` }] : []),
+      ...(group === 'day' && canEdit('dispatch') ? [{ label: 'Actions', cls: 'cell-actions', cell: r => `<button class="btn small" type="button" data-day="${esc(r.period)}">Edit</button>` }] : []),
     ], d.rows, { empty: 'Nothing was sent out in this period', emptyHint: 'Choose a longer period.' }))}`;
   const form = page.querySelector('#dp-filters');
   form.addEventListener('change', () => { const v = formData(form); location.hash = '/dispatch' + qs({ ...v, range: v.range === '3m' ? '' : v.range, group: v.group === 'day' ? '' : v.group }); });
   form.addEventListener('submit', e => e.preventDefault());
   const again = () => render(page, { query: parseHash().query });
-  page.querySelector('#dp-add').addEventListener('click', () => dayForm(today, again));
+  page.querySelector('#dp-add')?.addEventListener('click', () => dayForm(today, again));
   page.addEventListener('click', e => { const b = e.target.closest('[data-day]'); if (b) dayForm(b.dataset.day, again); });
 }
 

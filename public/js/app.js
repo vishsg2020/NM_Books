@@ -1,4 +1,4 @@
-import { state, api, get, esc, html, raw, roleName, parseHash, loadLookups, toast, onSubmit, stateBox, closeDrawer, startTheme } from './core.js';
+import { state, api, get, esc, html, raw, roleName, parseHash, loadLookups, toast, onSubmit, stateBox, closeDrawer, startTheme, canView, canEdit, isAdmin } from './core.js';
 import * as dashboard from './pages/dashboard.js';
 import * as sales from './pages/sales.js';
 import * as customers from './pages/customers.js';
@@ -13,35 +13,41 @@ import * as inventory from './pages/inventory.js';
 import * as users from './pages/users.js';
 
 const app = document.getElementById('app');
-const ALL = ['admin', 'manager', 'telesales', 'online', 'onsite', 'dispatch'];
-const SELLERS = ['admin', 'manager', 'telesales', 'online', 'onsite'];
-
+// Each menu item shows when the role can view one of its areas (Settings → Roles & access). Settings is Admin only.
 const NAV = [
-  { group: null, items: [{ path: 'dashboard', label: 'Dashboard', roles: ALL }] },
+  { group: null, items: [{ path: 'dashboard', label: 'Dashboard', area: 'dashboard' }] },
   { group: 'Sales', items: [
-    { path: 'sales', label: 'Sales', roles: SELLERS },
-    { path: 'sales', label: 'Orders', roles: ['dispatch'] },
-    { path: 'customers', label: 'Customers', roles: SELLERS },
-    { path: 'dispatch', label: 'Dispatch report', roles: ['admin', 'manager', 'dispatch'] },
-    { path: 'webimport', label: 'Website orders', roles: ['admin', 'manager', 'online'] },
+    { path: 'sales', label: 'Sales', area: 'sales', not: 'dispatch' },
+    { path: 'sales', label: 'Orders', area: 'sales', only: 'dispatch' },
+    { path: 'customers', label: 'Customers', area: 'customers' },
+    { path: 'dispatch', label: 'Dispatch report', area: ['dispatch', 'reports'] },
+    { path: 'webimport', label: 'Website orders', area: 'webimport' },
   ] },
   { group: 'Tele-sales', items: [
-    { path: 'calls', label: 'Calls', roles: ['admin', 'manager', 'telesales'] },
-    { path: 'callreport', label: 'Tele-sales report', roles: ['admin', 'manager', 'telesales'] },
+    { path: 'calls', label: 'Calls', area: 'calls' },
+    { path: 'callreport', label: 'Tele-sales report', area: ['calls', 'reports'] },
   ] },
   { group: 'Onsite', items: [
-    { path: 'visits', label: 'Visits', roles: ['admin', 'manager', 'onsite'] },
+    { path: 'visits', label: 'Visits', area: 'visits' },
   ] },
   { group: 'Books', items: [
-    { path: 'books', label: 'Book Master', roles: ALL },
-    { path: 'inventory', label: 'Stock movements', roles: ['admin', 'manager'] },
+    { path: 'books', label: 'Book Master', area: 'books' },
+    { path: 'inventory', label: 'Stock movements', area: 'stock' },
     // Costs & profit is hidden for now; the page still works at #/profit.
   ] },
   { group: 'Manage', items: [
-    { path: 'users', label: 'Users', roles: ['admin'] },
-    { path: 'settings', label: 'Settings', roles: ['admin'] },
+    { path: 'settings', label: 'Settings', admin: true },
   ] },
 ];
+const showItem = i => (i.admin ? isAdmin() : canView(i.area)) && (!i.only || state.me.role === i.only) && (!i.not || state.me.role !== i.not);
+
+// The area each page belongs to. `edits`: the page has something to change, so View alone gets the view-only note.
+const PAGE_AREA = {
+  dashboard: { area: 'dashboard' }, sales: { area: 'sales', edits: true }, customers: { area: 'customers', edits: true }, customer: { area: 'customers', edits: true },
+  dispatch: { area: ['dispatch', 'reports'], edits: 'dispatch' }, webimport: { area: 'webimport', edits: true }, calls: { area: 'calls', edits: true },
+  callreport: { area: ['calls', 'reports'] }, visits: { area: 'visits', edits: true }, books: { area: 'books', edits: true },
+  inventory: { area: 'stock', edits: true }, profit: { area: 'profit', edits: true }, settings: { admin: true }, users: { admin: true },
+};
 
 const ROUTES = {
   dashboard: dashboard.render,
@@ -57,7 +63,7 @@ const ROUTES = {
   callreport: calls.renderReport,
   books: books.render,
   inventory: inventory.render,
-  users: users.render,
+  users: () => { location.replace('#/settings?tab=users'); }, // Users now lives in Settings
   account: users.renderAccount,
 };
 
@@ -92,7 +98,7 @@ function renderShell() {
   const me = state.me;
   document.title = 'Nalla Malayalam · Book sales';
   const nav = NAV.map(g => {
-    const items = g.items.filter(i => i.roles.includes(me.role));
+    const items = g.items.filter(showItem);
     if (!items.length) return '';
     return (g.group ? `<li class="nav-group" aria-hidden="true">${esc(g.group)}</li>` : '') +
       items.map(i => `<li><a href="#/${i.path}" data-nav="${i.path}">${esc(i.label)}</a></li>`).join('');
@@ -135,6 +141,10 @@ async function route() {
   const fn = ROUTES[name];
   const seq = ++renderSeq;
   if (!fn) { page.innerHTML = stateBox('error', 'Page not found', 'Use the menu to find what you need.'); return; }
+  const pa = PAGE_AREA[name];
+  if (pa && (pa.admin ? !isAdmin() : !canView(pa.area))) { page.innerHTML = stateBox('error', 'You do not have access', 'Ask the Admin if you need this page.'); return; }
+  const editArea = pa && pa.edits ? (pa.edits === true ? pa.area : pa.edits) : null;
+  const viewOnly = !!(editArea && !pa.admin && !canEdit(editArea));
   page.innerHTML = stateBox('loading');
   // Render into a detached container and swap it in only if this is still the latest navigation,
   // so a slow page can never overwrite the page the user moved on to.
@@ -142,11 +152,12 @@ async function route() {
   try {
     await fn(view, { id: parts[1], query, isCurrent: () => seq === renderSeq });
     if (seq !== renderSeq) return;
+    if (viewOnly) view.querySelector('.page-head')?.insertAdjacentHTML('afterend', '<div class="notice info view-only">You have view-only access to this page.</div>');
     page.replaceChildren(view);
     page.focus({ preventScroll: true });
   } catch (err) {
     if (seq !== renderSeq) return;
-    if (err.status === 403) page.innerHTML = stateBox('error', 'You do not have access to this page', 'Ask the Admin if you need it.');
+    if (err.status === 403) page.innerHTML = stateBox('error', 'You do not have access', 'Ask the Admin if you need this page.');
     else if (err.status === 404) page.innerHTML = stateBox('error', 'Not found', err.message);
     else page.innerHTML = stateBox('error', 'Could not load this page', err.message);
   }
@@ -168,5 +179,7 @@ startTheme();
 window.addEventListener('hashchange', route);
 window.addEventListener('nm:signed-out', () => { if (state.me) { state.me = null; renderLogin('Your session has ended. Please sign in again.'); } });
 window.addEventListener('nm:changed', () => { loadLookups().catch(() => {}); });
+// After Roles & access is saved: fetch this user's access again and redraw the menu and page.
+window.addEventListener('nm:access', async () => { try { state.me = (await get('/api/me')).user; renderShell(); await route(); } catch { /* next load */ } });
 window.addEventListener('unhandledrejection', e => { toast(e.reason?.message || 'Something went wrong', 'error'); });
 boot();

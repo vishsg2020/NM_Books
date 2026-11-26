@@ -1,5 +1,5 @@
 // Costs & profit: cost of each book or set, profit per copy at each price, and estimated profit on what was sold.
-import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, can, parseHash, formData, qs, todayLocal, addDays, fmtDate } from '../core.js';
+import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, parseHash, formData, qs, todayLocal, addDays, fmtDate, canEdit } from '../core.js';
 
 const money = n => (n === null || n === undefined ? '—' : (n < 0 ? '−₹' : '₹') + Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 2 }));
 const pct = n => (n === null || n === undefined ? '—' : n.toLocaleString('en-IN', { maximumFractionDigits: 1 }) + '%');
@@ -24,7 +24,7 @@ export async function render(page, { query }) {
   const from = range === 'month' ? monthStart(today) : range === '3m' ? monthStart(today, 2) : range === '12m' ? monthStart(today, 11) : range === 'custom' ? (query.date_from || '') : '';
   const to = range === 'custom' ? (query.date_to || '') : range === 'all' ? '' : today;
   const d = await get('/api/profit' + qs({ date_from: from, date_to: to }));
-  const admin = can('admin'); const t = d.total;
+  const admin = canEdit('profit'); const t = d.total;
   const kpi = (l, v, s = '') => `<div class="kpi"><span class="l">${esc(l)}</span><span class="v">${esc(v)}</span><span class="s">${esc(s)}</span></div>`;
   const costed = d.rows.filter(r => r.has_costs); const sold = costed.filter(r => r.sold.qty > 0).sort((a, b) => b.sold.profit - a.sold.profit);
   page.innerHTML = html`<div class="page-head"><div><h1>Costs &amp; profit</h1><div class="sub">What each book or set costs, what is left at each price, and an estimate of profit on what was sold.</div></div></div>

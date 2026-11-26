@@ -2,7 +2,6 @@
 // Daily dispatch report: how many of each book or set went out each day (or month).
 // Two sources are added together: the history imported from the old Google Form (dispatch_history), and
 // orders moved to "Dispatched" in the app (counted on the day of their first "Stock dispatched" movement).
-const { requireRole } = require('../auth');
 const { bad, oneOf, isValidDate, today, int, str } = require('../util');
 const { audit } = require('../audit');
 
@@ -16,8 +15,8 @@ const ROWS = `
     JOIN (SELECT sale_id, MIN(to_char(at::timestamptz AT TIME ZONE '${TZ.replace(/[^A-Za-z_/+-]/g, '')}', 'YYYY-MM-DD')) AS day
             FROM stock_movements WHERE type = 'Stock dispatched' AND sale_id IS NOT NULL GROUP BY sale_id) d ON d.sale_id = i.sale_id`;
 
-module.exports = (app, { db }) => {
-  app.get('/api/dispatch-report', requireRole('admin', 'manager', 'dispatch'), async (req, res) => {
+module.exports = (app, { db, perm }) => {
+  app.get('/api/dispatch-report', perm(['dispatch', 'reports']), async (req, res) => {
     const q = req.query; const where = []; const p = {};
     if (q.date_from) { if (!isValidDate(q.date_from)) throw bad('From date is not valid'); where.push('x.day >= @from'); p.from = q.date_from; }
     if (q.date_to) { if (!isValidDate(q.date_to)) throw bad('To date is not valid'); where.push('x.day <= @to'); p.to = q.date_to; }
@@ -58,7 +57,7 @@ module.exports = (app, { db }) => {
   const dayRows = (h, day) => h.all(`SELECT d.book_id, d.label, d.qty, d.source, b.sku FROM dispatch_history d JOIN books b ON b.id = d.book_id WHERE d.day = ? ORDER BY d.id`, [day]);
   const readDay = q => { if (!isValidDate(q)) throw bad('Choose a valid date'); if (q > today()) throw bad('The date cannot be in the future'); return q; };
 
-  app.get('/api/dispatch-report/day', requireRole('admin', 'manager', 'dispatch'), async (req, res) => {
+  app.get('/api/dispatch-report/day', perm(['dispatch', 'reports']), async (req, res) => {
     const day = readDay(req.query.date);
     const rows = await dayRows(db, day);
     const products = await db.all(`SELECT id, name, kind, category FROM books WHERE lower(sku) <> 'other' AND (active = 1 OR id IN (SELECT book_id FROM dispatch_history WHERE day = ?))
@@ -70,7 +69,7 @@ module.exports = (app, { db }) => {
   });
 
   // Saves the whole day: what is sent replaces that day's report. Nothing sent removes it. Stock is never changed.
-  app.put('/api/dispatch-report/day', requireRole('admin', 'manager', 'dispatch'), async (req, res) => {
+  app.put('/api/dispatch-report/day', perm('dispatch'), async (req, res) => {
     const b = req.body; const day = readDay(b.date);
     const other = await db.get(`SELECT id FROM books WHERE lower(sku) = 'other'`);
     const valid = new Set((await db.all(`SELECT id FROM books WHERE lower(sku) <> 'other'`)).map(r => r.id));

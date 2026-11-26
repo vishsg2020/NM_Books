@@ -896,3 +896,89 @@ test('customer tidy: district spellings and the State of a PIN', () => {
   assert.equal(pinState('686669'), 'Kerala'); assert.equal(pinState('682555'), 'Lakshadweep'); assert.equal(pinState('560001'), 'Karnataka');
   assert.equal(pinState('641001'), 'Tamil Nadu'); assert.equal(pinState('110017'), 'Delhi'); assert.equal(pinState('68201'), null);
 });
+
+test('roles & access: Report Viewer reads the Dashboard and Reports and changes nothing', async () => {
+  const V = client();
+  ids.viewer = ok(await A.post('/api/users', { name: 'Ravi Viewer', email: 'v@x.in', password: pw, role: 'viewer' })).id;
+  await V.login('v@x.in');
+  const me = (await V.get('/api/me')).data.user;
+  assert.equal(me.role, 'viewer'); assert.equal(me.perms.dashboard, 'view'); assert.equal(me.perms.reports, 'view'); assert.equal(me.perms.sales, 'none');
+  for (const url of ['/api/dashboard', '/api/dashboard/trends', '/api/calls/report?date_from=2026-11-01&date_to=2026-11-30', '/api/dispatch-report', '/api/settings/lists']) assert.equal((await V.get(url)).status, 200, url);
+  for (const url of ['/api/sales', '/api/customers', '/api/calls', '/api/visits', '/api/inventory/movements', '/api/profit', '/api/imports/website', '/api/users', '/api/access']) assert.equal((await V.get(url)).status, 403, url);
+  assert.equal((await V.send('PUT', '/api/dispatch-report/day', { day: '2026-11-16', items: [] })).status, 403);
+  assert.equal((await V.post('/api/sales', { customer_name: 'X', items: [{ book_id: maam.id, qty: 1 }] })).status, 403);
+  assert.equal((await V.send('PUT', '/api/settings/theme', { name: 'blue' })).status, 403);
+  assert.equal((await V.post('/api/calls', { phone: '9888800001', status: 'Busy' })).status, 403);
+});
+
+test('roles & access: the Manager cannot reach users, roles or settings', async () => {
+  for (const url of ['/api/users', '/api/access']) assert.equal((await M.get(url)).status, 403, url);
+  assert.equal((await M.send('PUT', '/api/access', { grid: {} })).status, 403);
+  assert.equal((await M.patch(`/api/users/${ids.telesales}`, { role: 'manager' })).status, 403);
+  for (const [url, body] of [['/api/settings/charges', { cod_charge: 5 }], ['/api/settings/lists', {}], ['/api/settings/discounts', {}], ['/api/settings/theme', { name: 'teal' }]]) assert.equal((await M.send('PUT', url, body)).status, 403, url);
+  // and keeps everything else it had
+  for (const url of ['/api/sales', '/api/customers', '/api/calls', '/api/visits', '/api/inventory/movements', '/api/profit', '/api/dashboard/trends', '/api/users/salespeople']) assert.equal((await M.get(url)).status, 200, url);
+  const me = (await M.get('/api/me')).data.user.perms;
+  assert.deepEqual(me, { dashboard: 'view', sales: 'edit', dispatch: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view' });
+});
+
+test('roles & access: the Admin changes the grid, it applies at once, View and Edit are kept apart; Reset to defaults', async () => {
+  const V = client(); await V.login('v@x.in');
+  const d = (await A.get('/api/access')).data;
+  assert.equal(d.customised, false); assert.deepEqual(d.grid, d.defaults);
+  assert.ok(d.roles.find(r => r.key === 'admin' && !r.editable));
+  const cust = (await A.get('/api/customers')).data.rows[0];
+  // Report Viewer may see customers but not change them
+  const g = JSON.parse(JSON.stringify(d.grid)); g.viewer.customers = 'view'; g.manager.calls = 'none';
+  const saved = ok(await A.send('PUT', '/api/access', { grid: g, reason: 'Accounts checks customer details' }), 200);
+  assert.equal(saved.customised, true); assert.equal(saved.grid.viewer.customers, 'view');
+  assert.equal((await V.get('/api/customers')).status, 200);
+  const r = await V.patch(`/api/customers/${cust.id}`, { contact_person: 'X' });
+  assert.equal(r.status, 403); assert.match(r.data.error, /view-only/);
+  assert.equal((await M.get('/api/calls')).status, 403);
+  assert.equal((await M.get('/api/calls/report?date_from=2026-11-01&date_to=2026-11-30')).status, 200); // Reports still opens the tele-sales report
+  assert.equal((await V.get('/api/me')).data.user.perms.customers, 'view');
+  g.viewer.customers = 'edit';
+  ok(await A.send('PUT', '/api/access', { grid: g }), 200);
+  const p2 = await V.patch(`/api/customers/${cust.id}`, { contact_person: 'Checked' }); assert.equal(p2.status, 200, JSON.stringify(p2.data));
+  // the change and its reason are in the audit log
+  const log = await db.get(`SELECT before_json, after_json, reason FROM audit_events WHERE entity = 'settings' AND action = 'role_access' ORDER BY id LIMIT 1`);
+  assert.equal(log.reason, 'Accounts checks customer details');
+  assert.deepEqual(JSON.parse(log.after_json), { 'Manager · Calls': 'none', 'Report Viewer · Customers': 'view' });
+  // what can never be given
+  assert.equal((await A.send('PUT', '/api/access', { grid: { admin: { sales: 'none' } } })).status, 400);
+  assert.equal((await A.send('PUT', '/api/access', { grid: { manager: { users: 'edit' } } })).status, 400);
+  assert.equal((await A.send('PUT', '/api/access', { grid: { manager: { sales: 'full' } } })).status, 400);
+  // Corrections stay with the Admin whatever the grid says
+  const all = Object.fromEntries(Object.keys(d.grid).map(role => [role, Object.fromEntries(d.areas.map(a => [a.key, 'edit']))]));
+  ok(await A.send('PUT', '/api/access', { grid: all }), 200);
+  assert.equal((await V.post(`/api/customers/${cust.id}/merge`, { other_id: cust.id })).status, 403);
+  assert.equal((await M.get('/api/users')).status, 403);
+  // Reset to defaults
+  const back = ok(await A.send('PUT', '/api/access', { grid: d.defaults, reason: 'Reset to defaults' }), 200);
+  assert.deepEqual(back.grid, d.defaults);
+  assert.equal((await V.get('/api/customers')).status, 403); assert.equal((await M.get('/api/calls')).status, 200);
+});
+
+test('roles & access: nobody changes their own role; a role change signs the person out; one active Admin stays', async () => {
+  const me = (await A.get('/api/me')).data.user;
+  const r = await A.patch(`/api/users/${me.id}`, { role: 'manager' });
+  assert.equal(r.status, 400); assert.match(r.data.error, /own role/);
+  ok(await A.patch(`/api/users/${me.id}`, { name: 'Asha Admin', role: 'admin' }), 200); // the same role is not a change
+  const V = client(); await V.login('v@x.in');
+  ok(await A.patch(`/api/users/${ids.viewer}`, { role: 'dispatch' }), 200);
+  assert.equal((await V.get('/api/me')).status, 401);
+  await V.login('v@x.in');
+  assert.equal((await V.get('/api/me')).data.user.perms.dispatch, 'edit');
+  // a second Admin cannot remove the only other Admin's role while they are the last one left... and every role can be chosen
+  const A2 = client();
+  const a2 = ok(await A.post('/api/users', { name: 'Second Admin', email: 'a2@x.in', password: pw, role: 'admin' })).id;
+  await A2.login('a2@x.in');
+  ok(await A2.patch(`/api/users/${me.id}`, { role: 'viewer' }), 200);
+  assert.equal((await A.get('/api/me')).status, 401); // signed out by the change
+  const last = await A2.patch(`/api/users/${a2}`, { active: false });
+  assert.equal(last.status, 400);
+  ok(await A2.patch(`/api/users/${me.id}`, { role: 'admin' }), 200);
+  await A.login('a@x.in');
+  ok(await A.patch(`/api/users/${a2}`, { active: false }), 200);
+});

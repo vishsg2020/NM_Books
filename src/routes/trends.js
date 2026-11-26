@@ -1,7 +1,6 @@
 'use strict';
 // Manager dashboard charts (BA section 11): sales over time and by channel, product, sales person,
 // district and payment method. Everything is calculated from the sales records; cancelled orders never count.
-const { requireRole } = require('../auth');
 const { bad, oneOf, idParam, isValidDate } = require('../util');
 
 const PERIOD = {
@@ -10,8 +9,8 @@ const PERIOD = {
   month: 'substr(s.sale_date, 1, 7)',
 };
 
-module.exports = (app, { db }) => {
-  app.get('/api/dashboard/trends', requireRole('admin', 'manager'), async (req, res) => {
+module.exports = (app, { db, perm }) => {
+  app.get('/api/dashboard/trends', perm('reports'), async (req, res) => {
     const q = req.query; const where = [`s.status <> 'Cancelled'`]; const p = {};
     if (q.date_from) { if (!isValidDate(q.date_from)) throw bad('From date is not valid'); where.push('s.sale_date >= @from'); p.from = q.date_from; }
     if (q.date_to) { if (!isValidDate(q.date_to)) throw bad('To date is not valid'); where.push('s.sale_date <= @to'); p.to = q.date_to; }

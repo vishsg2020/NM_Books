@@ -577,3 +577,27 @@ hr.thin { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
 .t-maroon .chip-colour { background: #C25A6C; } .t-purple .chip-colour { background: #9B78D6; } .t-orange .chip-colour { background: #EE9A3E; }
 .t-charcoal .chip-colour { background: #4A555E; }
 input.pct { max-width: 90px; text-align: right; }
+
+/* ---------- Settings tabs: Users and Roles & access ---------- */
+.tab-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.tab-bar p { margin: 0; }
+.access-wrap { overflow-x: auto; }
+.access-grid { width: 100%; border-collapse: collapse; font-size: 14px; }
+.access-grid th, .access-grid td { padding: 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.access-grid thead th { font-size: 12.5px; color: var(--muted); background: var(--surface); }
+.access-grid th .sub { display: block; font-weight: 400; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.access-grid select, .ac-row select { min-width: 78px; min-height: 34px; padding: 4px 6px; }
+select.lv-edit { border-color: var(--brand); background: var(--green-soft); color: var(--green); font-weight: 600; }
+select.lv-view { background: var(--blue-soft); border-color: #9DB8D6; color: #1E4366; }
+.access-grid .own, .ac-row .own { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; font-weight: 400; }
+.access-grid .locked { font-weight: 600; color: var(--green); }
+.access-grid tr.fixed th, .access-grid tr.fixed td { background: var(--paper); }
+.ac-buttons { justify-content: flex-end; }
+.ac-phone { display: none; }
+.ac-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.ac-row select { width: 110px; }
+.view-only { margin-top: -4px; }
+@media (max-width: 760px) {
+  .ac-desk { display: none; }
+  .ac-phone { display: block; }
+}

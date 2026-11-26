@@ -30,7 +30,7 @@ const PW = 'demo-password';
   if ((await db.get('SELECT COUNT(*) n FROM users')).n) { console.error('Refusing to seed: this database already has users.'); process.exit(1); }
   const h = hashPassword(PW);
   const USERS = [['Demo Admin', 'admin', 'admin'], ['Demo Manager', 'manager', 'manager'], ['Demo Tele-sales', 'tele', 'telesales'],
-    ['Demo Online', 'online', 'online'], ['Demo Onsite', 'onsite', 'onsite'], ['Demo Dispatch', 'dispatch', 'dispatch']];
+    ['Demo Online', 'online', 'online'], ['Demo Onsite', 'onsite', 'onsite'], ['Demo Dispatch', 'dispatch', 'dispatch'], ['Demo Report Viewer', 'viewer', 'viewer']];
   for (const [name, who, role] of USERS) await db.run('INSERT INTO users (name,email,password_hash,role) VALUES (?,?,?,?)', [name, `${who}@demo.local`, h, role]);
 
   const server = createApp(db).listen(0);

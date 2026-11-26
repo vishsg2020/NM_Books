@@ -1,11 +1,9 @@
 'use strict';
 // Monthly upload of the website's order export, and the reminder that it is due.
-const { requireRole } = require('../auth');
 const { bad, today, bool, str } = require('../util');
 const { read } = require('../settings');
 const W = require('../website-import');
 
-const ROLES = ['admin', 'manager', 'online'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 /** Due when nothing has been uploaded since the 1st of this month. The month to upload is the one just finished. */
@@ -15,8 +13,8 @@ async function uploadStatus(db) {
   return { due: !last || !last.on || last.on < first, month: `${MONTHS[m - 1]} ${y}`, month_from: `${y}-${String(m).padStart(2, '0')}-01`, last: last || null };
 }
 
-module.exports = (app, { db }) => {
-  app.get('/api/imports/website', requireRole(...ROLES), async (_req, res) => {
+module.exports = (app, { db, perm }) => {
+  app.get('/api/imports/website', perm('webimport'), async (_req, res) => {
     const history = (await db.all(`SELECT e.at, e.after_json, u.name AS user_name FROM audit_events e LEFT JOIN users u ON u.id = e.user_id
       WHERE e.entity = 'import' AND e.action = 'website_orders_imported' ORDER BY e.id DESC LIMIT 12`))
       .map(r => { let a = {}; try { a = JSON.parse(r.after_json) || {}; } catch { /* keep empty */ } return { at: r.at, by: r.user_name || a.by || null, file: a.file || '', in_file: a.in_file ?? a.inFile ?? null, imported: a.imported ?? 0, amount: a.amount ?? 0 }; });
@@ -24,7 +22,7 @@ module.exports = (app, { db }) => {
   });
 
   // body: { filename, csv } for a CSV file, or { filename, xlsx } (base64) for an Excel file; dry_run: true only checks.
-  app.post('/api/imports/website', requireRole(...ROLES), async (req, res) => {
+  app.post('/api/imports/website', perm('webimport'), async (req, res) => {
     const b = req.body; const file = str(b.filename, { max: 200, name: 'File name' }) || 'website orders';
     let rows;
     if (typeof b.csv === 'string' && b.csv.trim()) rows = W.parseCsv(b.csv);

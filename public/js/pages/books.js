@@ -1,10 +1,10 @@
-import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, can, fmtStamp, parseHash, wireFilters, qs, state } from '../core.js';
+import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, fmtStamp, parseHash, wireFilters, qs, state, canEdit, canView } from '../core.js';
 import { movementForm } from './inventory.js';
 
 export const stockPill = b => (!b.active ? pill('Inactive') : b.kind === 'Pack' && b.available > 0 ? pill('In stock') : b.available <= 0 ? pill('Out of stock') : b.available <= b.min_stock ? pill('Low stock') : pill('In stock'));
 
 export async function render(page) {
-  const admin = can('admin');
+  const admin = canEdit('books'); const stock = canEdit('stock');
   const all = await get('/api/books');
   const cats = [...new Set(all.map(b => b.category).filter(Boolean))].sort();
   const { query } = parseHash();
@@ -30,9 +30,9 @@ export async function render(page) {
       { label: 'Reserved', cls: 'num', cell: b => (b.kind === 'Pack' ? '—' : String(b.reserved)) },
       { label: 'Available', cls: 'num', cell: b => `<strong>${b.available}</strong><span class="sub">${b.kind === 'Pack' ? 'sets possible' : 'min ' + b.min_stock}</span>` },
       { label: 'Status', cell: b => stockPill(b).__raw },
-      ...(can('admin', 'manager') ? [{ label: 'Actions', cls: 'cell-actions', cell: b =>
-        (admin && b.kind !== 'Pack' ? `<button class="btn small" type="button" data-stock="${b.id}">Stock</button>` : '') + (admin ? `<button class="btn small" type="button" data-edit="${b.id}">Edit</button>` : '') +
-        (b.kind !== 'Pack' ? `<a class="btn small" href="#/inventory?book_id=${b.id}">History</a>` : '') }] : []),
+      ...(admin || canView('stock') ? [{ label: 'Actions', cls: 'cell-actions', cell: b =>
+        (stock && b.kind !== 'Pack' ? `<button class="btn small" type="button" data-stock="${b.id}">Stock</button>` : '') + (admin ? `<button class="btn small" type="button" data-edit="${b.id}">Edit</button>` : '') +
+        (b.kind !== 'Pack' && canView('stock') ? `<a class="btn small" href="#/inventory?book_id=${b.id}">History</a>` : '') }] : []),
     ], rows, { empty: all.length ? 'No books match these filters' : 'No books yet', emptyHint: all.length ? 'Clear the filters to see every book.' : (admin ? 'Add the first book to start recording stock and sales.' : 'The Admin adds books here.') });
   };
   const changed = () => { window.dispatchEvent(new Event('nm:changed')); load(); };

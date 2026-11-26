@@ -4,6 +4,7 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const { createAuth, requireAuth } = require('./auth');
 const { HttpError } = require('./util');
+const { createAccess } = require('./access');
 
 function createApp(db) {
   const app = express();
@@ -36,7 +37,8 @@ function createApp(db) {
     next();
   });
 
-  const ctx = { db, auth };
+  const access = createAccess(db);
+  const ctx = { db, auth, access, perm: access.perm, requireAdmin: access.requireAdmin, requireWide: access.requireWide };
   app.post('/api/login', async (req, res) => {
     const body = req.body || {};
     const user = await auth.login(req, res, body.email, body.password);
@@ -63,6 +65,7 @@ function createApp(db) {
   require('./routes/edits')(app, ctx);
   require('./routes/dispatch-report')(app, ctx);
   require('./routes/imports')(app, ctx);
+  require('./routes/access')(app, ctx);
 
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Not found')));
   // Code and pages are re-checked on every load, so an update shows up at once; fonts and images can be kept.

@@ -1,5 +1,5 @@
 // Website orders: once a month, upload the order export downloaded from the website. Duplicates are ignored.
-import { api, get, esc, html, raw, inr, fmtDate, fmtStamp, table, toast, parseHash } from '../core.js';
+import { api, get, esc, html, raw, inr, fmtDate, fmtStamp, table, toast, parseHash, canEdit } from '../core.js';
 
 const n = v => Number(v || 0).toLocaleString('en-IN');
 async function fileBody(file) {
@@ -56,6 +56,8 @@ export async function render(page) {
         { label: 'Amount', cls: 'num', cell: r => inr(r.amount) },
       ], d.history, { empty: 'No uploads yet' }))}</section>
     <p class="muted small">Uploaded orders are saved as Online / Website sales, paid by card and delivered. They do not reserve or reduce stock; record the stock that left under Stock movements, or enter a website order by hand with Record a sale when it should go through packing and dispatch.</p>`;
+  // View only: the history and reminder stay, the upload goes.
+  if (!canEdit('webimport')) { page.querySelector('#wi-form')?.closest('.panel')?.remove(); return; }
   const form = page.querySelector('#wi-form'); const out = page.querySelector('#wi-out'); let body = null;
   const fail = err => { out.innerHTML = `<div class="notice error">${esc(err.message || 'Something went wrong')}</div>`; };
   form.addEventListener('submit', async e => {

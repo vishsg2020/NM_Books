@@ -1,4 +1,4 @@
-import { api, get, esc, html, raw, table, drawer, onSubmit, options, toast, can, fmtStamp, parseHash, wireFilters, qs, state } from '../core.js';
+import { api, get, esc, html, raw, table, drawer, onSubmit, options, toast, fmtStamp, parseHash, wireFilters, qs, state, canEdit } from '../core.js';
 
 const TYPES = ['Opening stock', 'Stock received', 'Stock issued', 'Stock reserved', 'Reservation released', 'Stock dispatched', 'Onsite sale', 'Stock returned', 'Damaged stock', 'Stock adjustment'];
 const MANUAL = [
@@ -14,7 +14,7 @@ export async function render(page) {
   const { query } = parseHash();
   const books = state.books.filter(b => b.kind !== 'Pack');
   page.innerHTML = html`<div class="page-head"><div><h1>Stock movements</h1><div class="sub">Every change to stock, newest first. Orders reserve and dispatch stock automatically.</div></div>
-    ${raw(can('admin') ? '<div class="actions"><button class="btn primary" type="button" id="add-m">Record stock movement</button></div>' : '')}</div>
+    ${raw(canEdit('stock') ? '<div class="actions"><button class="btn primary" type="button" id="add-m">Record stock movement</button></div>' : '')}</div>
     <form class="filters" id="m-filters">
       <div class="field grow"><label for="mf-b">Book</label><select id="mf-b" name="book_id">${raw(options(books.map(b => [b.id, b.name]), query.book_id, 'All books'))}</select></div>
       <div class="field"><label for="mf-t">Type</label><select id="mf-t" name="type">${raw(options(TYPES, query.type, 'All types'))}</select></div>

@@ -1,5 +1,5 @@
 'use strict';
-const { requireRole, CHANNEL_OF } = require('../auth');
+const { CHANNEL_OF } = require('../auth');
 const { audit, history } = require('../audit');
 const { moveStock, saleStock } = require('../stock');
 const { getLists } = require('../settings');
@@ -12,7 +12,6 @@ const METHODS = ['UPI', 'Bank Transfer', 'COD', 'Cash', 'Card', 'Other'];
 const FLOW = ['Confirmed', 'Packing', 'Ready to Dispatch', 'Dispatched', 'Delivered'];
 const STATUSES = [...FLOW, 'Completed', 'Cancelled'];
 const PAY_STATUSES = ['Paid', 'Partially Paid', 'Unpaid', 'COD'];
-const SELLERS = ['admin', 'manager', 'telesales', 'online', 'onsite'];
 
 function paymentStatus(total, received, method) {
   if (received >= total) return 'Paid';
@@ -27,7 +26,7 @@ const LIST = `s.id, s.sale_no, s.sale_date, s.channel, s.status, s.customer_id, 
   (SELECT COALESCE(SUM(i.qty),0) FROM sale_items i WHERE i.sale_id = s.id) AS total_qty,
   (SELECT string_agg(b.name || ' × ' || i.qty, ', ' ORDER BY i.id) FROM sale_items i JOIN books b ON b.id = i.book_id WHERE i.sale_id = s.id) AS books`;
 
-module.exports = (app, { db }) => {
+module.exports = (app, { db, perm }) => {
   /** Which sales a role may see: channel roles their own channel, Dispatch the orders that are shipped. */
   function scope(user, where, p) {
     if (CHANNEL_OF[user.role]) { where.push('s.channel = @scope_channel'); p.scope_channel = CHANNEL_OF[user.role]; }
@@ -52,7 +51,7 @@ module.exports = (app, { db }) => {
     return sale;
   }
 
-  app.get('/api/sales', async (req, res) => {
+  app.get('/api/sales', perm('sales'), async (req, res) => {
     const q = req.query; const where = []; const p = {};
     scope(req.user, where, p);
     if (q.channel) { where.push('s.channel = @channel'); p.channel = oneOf(q.channel, CHANNELS, { name: 'Channel' }); }
@@ -81,7 +80,7 @@ module.exports = (app, { db }) => {
     res.json({ rows: rows.slice(0, 500), truncated: rows.length > 500, totals });
   });
 
-  app.get('/api/sales/:id', async (req, res) => {
+  app.get('/api/sales/:id', perm('sales'), async (req, res) => {
     const sale = await load(idParam(req.params.id));
     if (!sale) throw notFound('Sale');
     assertCanSee(req.user, sale);
@@ -92,7 +91,7 @@ module.exports = (app, { db }) => {
   });
 
   // ── Record a payment against an order ────────────────────────────────────
-  app.post('/api/sales/:id/payments', requireRole(...SELLERS), async (req, res) => {
+  app.post('/api/sales/:id/payments', perm('sales'), async (req, res) => {
     const b = req.body;
     const amount = money(b.amount, { required: true, name: 'Amount' });
     if (amount < 1) throw bad('Amount must be at least ₹1', { field: 'Amount' });
@@ -119,7 +118,7 @@ module.exports = (app, { db }) => {
   });
 
   // ── Move an order through packing and dispatch ───────────────────────────
-  app.post('/api/sales/:id/status', requireRole('admin', 'manager', 'dispatch'), async (req, res) => {
+  app.post('/api/sales/:id/status', perm('dispatch'), async (req, res) => {
     const to = oneOf(req.body.status, FLOW, { required: true, name: 'Status' });
     const id = idParam(req.params.id);
     await db.tx(async t => {
@@ -146,7 +145,7 @@ module.exports = (app, { db }) => {
   });
 
   // ── Cancel an order that has not been dispatched: its reserved stock is released ──
-  app.post('/api/sales/:id/cancel', requireRole(...SELLERS), async (req, res) => {
+  app.post('/api/sales/:id/cancel', perm('sales'), async (req, res) => {
     const reason = str(req.body.reason, { required: true, name: 'Reason', max: 300 });
     const id = idParam(req.params.id);
     await db.tx(async t => {
@@ -167,9 +166,8 @@ module.exports = (app, { db }) => {
     res.json(await load(id));
   });
 
-  require('./sales-create')(app, { db, load });
+  require('./sales-create')(app, { db, load, perm });
 };
 module.exports.paymentStatus = paymentStatus;
 module.exports.CHANNELS = CHANNELS;
 module.exports.METHODS = METHODS;
-module.exports.SELLERS = SELLERS;

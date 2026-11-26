@@ -1,7 +1,7 @@
 'use strict';
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const { HttpError, forbidden } = require('./util');
+const { HttpError } = require('./util');
 
 const COOKIE = 'nmb_session';
 const SESSION_HOURS = Number(process.env.SESSION_HOURS || 12);
@@ -12,7 +12,7 @@ const SECURE_COOKIE = process.env.NODE_ENV === 'production' || !!process.env.NET
 const hashToken = t => crypto.createHash('sha256').update(t).digest('hex');
 
 /** Every role in the system. Channel roles record sales for one channel only. */
-const ROLES = ['admin', 'manager', 'telesales', 'online', 'onsite', 'dispatch'];
+const { ROLES } = require('./access');
 const SALES_ROLES = ['telesales', 'online', 'onsite'];
 /** The sales channel a channel role works in. */
 const CHANNEL_OF = { telesales: 'Tele-sales', online: 'Online', onsite: 'Onsite' };
@@ -83,10 +83,5 @@ function requireAuth(req, _res, next) {
   if (!req.user) return next(new HttpError(401, 'Please sign in'));
   next();
 }
-const requireRole = (...roles) => (req, _res, next) => {
-  if (!req.user) return next(new HttpError(401, 'Please sign in'));
-  if (!roles.includes(req.user.role)) return next(forbidden());
-  next();
-};
 
-module.exports = { createAuth, requireAuth, requireRole, hashPassword, COOKIE, ROLES, SALES_ROLES, CHANNEL_OF };
+module.exports = { createAuth, requireAuth, hashPassword, COOKIE, ROLES, SALES_ROLES, CHANNEL_OF };

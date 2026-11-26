@@ -2,8 +2,9 @@ import { api, get, esc, html, raw, pill, table, drawer, onSubmit, options, toast
 
 export async function render(page) {
   const users = await get('/api/users');
-  page.innerHTML = `<div class="page-head"><div><h1>Users</h1><div class="sub">Who can sign in, and with which role.</div></div>
-    <div class="actions"><button class="btn primary" type="button" id="add-u">Add user</button></div></div><div id="u-list"></div>`;
+  // Shown as the Users tab of Settings.
+  page.innerHTML = `<div class="tab-bar"><p class="muted small">Who can sign in, and with which role. What each role can see and change is on <a href="#/settings?tab=access">Roles &amp; access</a>.</p>
+    <button class="btn primary" type="button" id="add-u">Add user</button></div><div id="u-list"></div>`;
   page.querySelector('#u-list').innerHTML = table([
     { label: 'Name', cell: u => `${esc(u.name)}${u.id === state.me.id ? ' <span class="muted">(you)</span>' : ''}<span class="sub">${esc(u.email)}</span>` },
     { label: 'Role', cell: u => esc(roleName(u.role)) },
@@ -26,18 +27,23 @@ function userForm(u, after) {
     body: html`<form id="u-form" novalidate>
       <div class="field"><label for="u-name">Name *</label><input id="u-name" name="name" required maxlength="100" value="${u?.name}"></div>
       ${raw(editing ? `<p class="muted">${esc(u.email)}</p>` : `<div class="field"><label for="u-email">Email *</label><input id="u-email" name="email" type="email" required autocomplete="off"></div>`)}
-      ${raw(self ? `<p class="muted">Role: ${esc(roleName(u.role))}</p>` : `<div class="field"><label for="u-role">Role *</label><select id="u-role" name="role">${options(ROLES, u?.role || 'telesales')}</select>
-        <div class="hint">Sales team roles record sales for their own channel only. Changing a role signs the user out.</div></div>`)}
+      ${raw(self ? `<p class="muted">Role: ${esc(roleName(u.role))}. You cannot change your own role.</p>` : `<div class="field"><label for="u-role">Role *</label><select id="u-role" name="role">${options(ROLES, u?.role || 'telesales')}</select>
+        <div class="hint">What each role can see and change is set on Roles &amp; access. Tele-sales, Online and Onsite see only their own channel's sales.</div></div>
+        ${editing ? '<div class="notice warn hidden" id="u-role-warn"></div>' : ''}`)}
       <div class="field"><label for="u-pw">${editing ? 'New password' : 'Password *'}</label><input id="u-pw" name="password" type="password" minlength="8" autocomplete="new-password">
         <div class="hint">${editing ? 'Leave blank to keep the current password. ' : ''}At least 8 characters. Share it privately.</div></div>
       ${raw(editing && !self ? `<label class="check"><input type="checkbox" name="active" ${u.active ? 'checked' : ''}> Can sign in</label>` : '')}
     </form>`,
     foot: `<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="u-form">${editing ? 'Save user' : 'Add user'}</button>`,
     onMount: (d, close) => {
+      const sel = d.querySelector('#u-role'); const warn = d.querySelector('#u-role-warn');
+      sel?.addEventListener('change', () => { if (!warn) return;
+        warn.textContent = `Changing the role from ${roleName(u.role)} to ${roleName(sel.value)} signs ${u.name} out. They sign in again with the same password.`;
+        warn.classList.toggle('hidden', sel.value === u.role); });
       onSubmit(d.querySelector('#u-form'), async v => {
         if (editing) {
           const body = { name: v.name };
-          if (v.role) body.role = v.role;
+          if (v.role && v.role !== u.role) body.role = v.role;
           if (v.password) body.password = v.password;
           if (v.active !== undefined) body.active = v.active;
           await api('PATCH', `/api/users/${u.id}`, body);

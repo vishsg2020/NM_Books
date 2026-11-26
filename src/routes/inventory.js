@@ -1,5 +1,4 @@
 'use strict';
-const { requireRole } = require('../auth');
 const { moveStock } = require('../stock');
 const { bad, notFound, str, int, oneOf, isValidDate, idParam } = require('../util');
 
@@ -9,9 +8,9 @@ const NEEDS_NOTE = ['Stock issued', 'Damaged stock', 'Stock adjustment'];
 const ALL_TYPES = ['Opening stock', 'Stock received', 'Stock issued', 'Stock reserved', 'Reservation released', 'Stock dispatched',
   'Onsite sale', 'Stock returned', 'Damaged stock', 'Stock adjustment'];
 
-module.exports = (app, { db }) => {
+module.exports = (app, { db, perm }) => {
   // Stock movement history, newest first.
-  app.get('/api/inventory/movements', requireRole('admin', 'manager'), async (req, res) => {
+  app.get('/api/inventory/movements', perm('stock'), async (req, res) => {
     const q = req.query; const where = []; const p = {};
     if (q.book_id) { where.push('m.book_id = @book'); p.book = idParam(q.book_id); }
     if (q.type) { where.push('m.type = @type'); p.type = oneOf(q.type, ALL_TYPES, { name: 'Type' }); }
@@ -24,7 +23,7 @@ module.exports = (app, { db }) => {
     res.json({ rows: rows.slice(0, 500), truncated: rows.length > 500 });
   });
 
-  app.post('/api/inventory/movements', requireRole('admin'), async (req, res) => {
+  app.post('/api/inventory/movements', perm('stock'), async (req, res) => {
     const b = req.body;
     const bookId = int(b.book_id, { required: true, min: 1, name: 'Book' });
     const type = oneOf(b.type, MANUAL, { required: true, name: 'Movement type' });

@@ -1,23 +1,23 @@
-import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, can, fmtDate, fmtStamp, parseHash, setQuery, wireFilters, qs, state, myChannel, todayLocal, drawerGeneration, reasonBox } from '../core.js';
+import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, can, fmtDate, fmtStamp, parseHash, setQuery, wireFilters, qs, state, myChannel, todayLocal, drawerGeneration, reasonBox, wide, canEdit, isAdmin } from '../core.js';
 import { saleForm } from './sale-form.js';
 
 const STATUSES = ['Confirmed', 'Packing', 'Ready to Dispatch', 'Dispatched', 'Delivered', 'Completed', 'Cancelled'];
 const FLOW = ['Confirmed', 'Packing', 'Ready to Dispatch', 'Dispatched', 'Delivered'];
 const NEXT_LABEL = { Packing: 'Start packing', 'Ready to Dispatch': 'Mark ready to dispatch', Dispatched: 'Mark dispatched', Delivered: 'Mark delivered' };
 const payMethods = () => state.lists.payment_methods.filter(m => m !== 'COD'); // COD is how an order is placed, not how money arrives
-const sellers = () => can('admin', 'manager', 'telesales', 'online', 'onsite');
+const sellers = () => canEdit('sales') && state.me.role !== 'dispatch';
 
 export async function renderList(page, { query }) {
-  const wide = can('admin', 'manager'); const dispatch = can('dispatch');
+  const wideRole = wide(); const dispatch = can('dispatch');
   page.innerHTML = html`<div class="page-head"><div><h1>${dispatch ? 'Orders' : 'Sales'}</h1>
       <div class="sub">${dispatch ? 'Orders to pack, dispatch and deliver.' : myChannel() ? `${myChannel()} sales and orders.` : 'Every sale across Tele-sales, Online and Onsite.'}</div></div>
     ${raw(sellers() ? `<div class="actions"><button class="btn primary" type="button" id="add-s">${myChannel() === 'Onsite' ? 'Record a visit' : 'Record a sale'}</button></div>` : '')}</div>
     <form class="filters" id="s-filters">
       <div class="field grow"><label for="sf-q">Search</label><input id="sf-q" name="q" type="search" placeholder="Customer, phone, sale or order number" value="${query.q}"></div>
-      ${raw(wide || dispatch ? `<div class="field"><label for="sf-ch">Channel</label><select id="sf-ch" name="channel">${options(['Tele-sales', 'Online', 'Onsite'], query.channel, 'All channels')}</select></div>` : '')}
+      ${raw(wideRole || dispatch ? `<div class="field"><label for="sf-ch">Channel</label><select id="sf-ch" name="channel">${options(['Tele-sales', 'Online', 'Onsite'], query.channel, 'All channels')}</select></div>` : '')}
       <div class="field"><label for="sf-st">Status</label><select id="sf-st" name="status">${raw(options([['open', 'Not yet dispatched'], ...STATUSES.filter(s => !(dispatch && s === 'Completed')).map(s => [s, s])], query.status, 'All except cancelled'))}</select></div>
       <div class="field"><label for="sf-ps">Payment</label><select id="sf-ps" name="payment_status">${raw(options([['outstanding', 'Has a balance'], ['overdue', 'Overdue'], 'Paid', 'Partially Paid', 'Unpaid', 'COD'], query.payment_status, 'All'))}</select></div>
-      ${raw(wide ? `<div class="field"><label for="sf-sp">Sales person</label><select id="sf-sp" name="salesperson">${options(state.people.map(p => [p.id, p.name + (p.active ? '' : ' (inactive)')]), query.salesperson, 'Everyone')}</select></div>` : '')}
+      ${raw(wideRole ? `<div class="field"><label for="sf-sp">Sales person</label><select id="sf-sp" name="salesperson">${options(state.people.map(p => [p.id, p.name + (p.active ? '' : ' (inactive)')]), query.salesperson, 'Everyone')}</select></div>` : '')}
       <div class="field"><label for="sf-b">Book</label><select id="sf-b" name="book_id">${raw(options(state.books.map(b => [b.id, b.name]), query.book_id, 'All books'))}</select></div>
       <div class="field"><label for="sf-f">From</label><input id="sf-f" name="date_from" type="date" value="${query.date_from}"></div>
       <div class="field"><label for="sf-t">To</label><input id="sf-t" name="date_to" type="date" value="${query.date_to}"></div>
@@ -60,7 +60,7 @@ export async function openSale(id, after = () => {}) {
   const s = await get(`/api/sales/${id}`);
   if (gen !== drawerGeneration()) return; // the user closed the drawer or moved on while this was loading
   const open = !s.imported && FLOW.includes(s.status) && FLOW.indexOf(s.status) < FLOW.indexOf('Dispatched');
-  const canMove = !s.imported && can('admin', 'manager', 'dispatch') && FLOW.includes(s.status) && s.status !== 'Delivered';
+  const canMove = !s.imported && canEdit('dispatch') && FLOW.includes(s.status) && s.status !== 'Delivered';
   const next = FLOW[FLOW.indexOf(s.status) + 1];
   const canPay = sellers() && s.status !== 'Cancelled' && s.balance > 0;
   const overdue = s.balance > 0 && s.due_date && s.due_date < todayLocal() && s.status !== 'Cancelled';
@@ -75,7 +75,7 @@ export async function openSale(id, after = () => {}) {
         ${canMove && next ? `<button class="btn primary" type="button" data-move="${esc(next)}">${esc(NEXT_LABEL[next])}</button>` : ''}
         ${canMove && open && next !== 'Dispatched' ? '<button class="btn" type="button" data-move="Dispatched">Mark dispatched</button>' : ''}
         ${canPay ? '<button class="btn" type="button" id="pay-btn">Record payment</button>' : ''}
-        ${can('admin') && s.status !== 'Cancelled' ? '<button class="btn" type="button" id="edit-btn">Edit sale</button>' : ''}
+        ${isAdmin() && s.status !== 'Cancelled' ? '<button class="btn" type="button" id="edit-btn">Edit sale</button>' : ''}
         ${sellers() && open ? '<button class="btn danger" type="button" id="cancel-btn">Cancel order</button>' : ''}
       </div>
       <div id="pay-slot"></div>
@@ -111,7 +111,7 @@ export async function openSale(id, after = () => {}) {
         { label: 'Method', cell: p => `${esc(p.method)}${p.note ? `<span class="sub">${esc(p.note)}</span>` : ''}` },
         { label: 'Amount', cls: 'num', cell: p => esc(inr(p.amount)) },
         { label: 'Recorded by', cell: p => esc(p.user_name) },
-        ...(can('admin') ? [{ label: 'Actions', cls: 'cell-actions', cell: p => `<button class="btn small" type="button" data-pay-edit="${p.id}">Edit</button><button class="btn small danger" type="button" data-pay-del="${p.id}">Remove</button>` }] : []),
+        ...(isAdmin() ? [{ label: 'Actions', cls: 'cell-actions', cell: p => `<button class="btn small" type="button" data-pay-edit="${p.id}">Edit</button><button class="btn small danger" type="button" data-pay-del="${p.id}">Remove</button>` }] : []),
       ], s.payments, { empty: 'No payments recorded yet' })}
       <h3 class="section-gap">Stock</h3>
       <ul class="timeline">${s.stock.map(m => `<li><strong>${esc(m.type)}</strong> · ${esc(m.book_name)} × ${m.qty}<div class="muted">${esc(fmtStamp(m.at))}${m.user_name ? ' · ' + esc(m.user_name) : ''}</div></li>`).join('')}</ul>

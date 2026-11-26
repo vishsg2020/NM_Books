@@ -1,10 +1,10 @@
 // Onsite: visits to schools, bookstores and exhibitions, with or without a sale, and the visits still to make.
-import { api, get, esc, html, raw, inr, pill, table, options, can, fmtDate, parseHash, setQuery, wireFilters, qs, state, drawer, onSubmit, toast, reasonBox, todayLocal } from '../core.js';
+import { api, get, esc, html, raw, inr, pill, table, options, fmtDate, parseHash, setQuery, wireFilters, qs, state, drawer, onSubmit, toast, reasonBox, todayLocal, wide, canEdit, isAdmin } from '../core.js';
 import { saleForm } from './sale-form.js';
 
 const tone = { Sale: 'green', 'Order taken': 'blue', 'No sale': '', 'Payment collected': 'green', Overdue: 'red', Today: 'amber', Upcoming: '' };
 const vpill = t => pill(t, tone[t] ?? '').__raw;
-const manager = () => can('admin', 'manager');
+const manager = () => wide();
 
 /** Table of visits, used on the Visits page and on a school's or bookstore's profile. */
 export function visitsTable(rows, { place = true, person = true, empty = 'No visits yet' } = {}) {
@@ -15,7 +15,7 @@ export function visitsTable(rows, { place = true, person = true, empty = 'No vis
     { label: 'Remarks', cell: v => esc(v.remarks || '') },
     { label: 'Next visit', cell: v => (v.next_visit_date ? `${esc(fmtDate(v.next_visit_date))}<span class="sub">${v.next_visit_done_by ? 'Done' : 'Pending'}</span>` : '') },
     ...(person ? [{ label: 'By', cell: v => esc(v.salesperson_name) }] : []),
-    ...(can('admin') ? [{ label: 'Actions', cls: 'cell-actions', cell: v => `<button class="btn small" type="button" data-visit-edit="${v.id}">Edit</button>${v.sale_id ? '' : `<button class="btn small danger" type="button" data-visit-del="${v.id}">Remove</button>`}` }] : []),
+    ...(isAdmin() ? [{ label: 'Actions', cls: 'cell-actions', cell: v => `<button class="btn small" type="button" data-visit-edit="${v.id}">Edit</button>${v.sale_id ? '' : `<button class="btn small danger" type="button" data-visit-del="${v.id}">Remove</button>`}` }] : []),
   ], rows, { empty, emptyHint: '' });
 }
 
@@ -52,7 +52,7 @@ function editVisitForm(v, after) {
 export async function renderList(page, { query }) {
   const people = state.people.filter(p => ['admin', 'manager', 'onsite'].includes(p.role));
   page.innerHTML = html`<div class="page-head"><div><h1>Visits</h1><div class="sub">Every visit to a school or bookstore, whether or not books were sold. An exhibition is recorded from Record a sale.</div></div>
-      <div class="actions"><button class="btn primary" type="button" id="add-v">Record a visit</button></div></div>
+      ${canEdit('visits') ? '<div class="actions"><button class="btn primary" type="button" id="add-v">Record a visit</button></div>' : ''}</div>
     <section class="panel"><h2>Visits to make</h2><div id="v-due"></div></section>
     <form class="filters top-gap" id="v-filters">
       <div class="field grow"><label for="vf-q">Search</label><input id="vf-q" name="q" type="search" placeholder="Place, contact person or remarks" value="${query.q}"></div>
@@ -86,7 +86,7 @@ export async function renderList(page, { query }) {
   const open = locationId => saleForm({ startChannel: 'Onsite', customer: locationId ? { location_id: locationId } : null, after: reload });
   wireFilters(page.querySelector('#v-filters'), () => Promise.all([loadDue(), load()]));
   wireVisitActions(page.querySelector('#v-list'), () => shownVisits, reload);
-  page.querySelector('#add-v').addEventListener('click', () => open(null));
+  page.querySelector('#add-v')?.addEventListener('click', () => open(null));
   page.querySelector('#v-due').addEventListener('click', e => { const b = e.target.closest('[data-visit]'); if (b) open(b.dataset.visit); });
   await Promise.all([loadDue(), load()]);
   if (query.new) { const q = { ...parseHash().query }; delete q.new; setQuery(q); open(null); }

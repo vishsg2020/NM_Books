@@ -1,4 +1,4 @@
-import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, fmtDate, parseHash, wireFilters, qs, state, waLink, can, STATES } from '../core.js';
+import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, fmtDate, parseHash, wireFilters, qs, state, waLink, STATES, wide, canEdit, isAdmin } from '../core.js';
 import { openSale } from './sales.js';
 import { callsTable, callForm, wireCallActions } from './calls.js';
 import { visitsTable, wireVisitActions } from './visits.js';
@@ -28,7 +28,7 @@ export async function renderList(page, { query }) {
   const tabs = `<nav class="tabs" aria-label="Customer lists"><a href="#/customers" ${update ? '' : 'aria-current="page"'}>Customers <span class="count">${n(sum.complete)}</span></a>
     <a href="#/customers?view=update" ${update ? 'aria-current="page"' : ''}>Update needed <span class="count">${n(sum.needing + sum.sales_without_customer)}</span></a></nav>`;
   page.innerHTML = html`<div class="page-head"><div><h1>Customers</h1><div class="sub">${update ? 'Records that are missing a detail or need a check before they join the customer list.' : 'Complete customer records. A customer is recognised by their contact number.'}</div></div>
-      <div class="actions">${raw(!update && can('admin', 'manager') ? '<button class="btn" type="button" id="gc-dl">Download for Google Contacts</button>' : '')}${raw(update ? '' : '<button class="btn" type="button" id="wa-all">WhatsApp the customers shown</button>')}</div></div>
+      <div class="actions">${raw(!update && wide() ? '<button class="btn" type="button" id="gc-dl">Download for Google Contacts</button>' : '')}${raw(update ? '' : '<button class="btn" type="button" id="wa-all">WhatsApp the customers shown</button>')}</div></div>
     ${raw(tabs)}
     ${raw(update ? `<div class="chips">${REASONS.map(r => `<a class="chip${query.reason === r ? ' on' : ''}" href="#/customers?view=update${query.reason === r ? '' : '&reason=' + encodeURIComponent(r)}" title="${esc(REASON_HELP[r])}">${esc(r)} <b>${n(sum.reasons[r])}</b></a>`).join('')}
       <a class="chip" href="#dup-sec">Possible duplicates <b id="dup-count">…</b></a><a class="chip" href="#nocust-sec">Sales with no customer <b>${n(sum.sales_without_customer)}</b></a></div>` : '')}
@@ -112,8 +112,8 @@ async function loadDuplicates(page) {
   box.innerHTML = table([
     { label: 'Keep this record', cell: g => who(g[0]) },
     { label: 'Merge into it', cell: g => g.slice(1).map(who).join('<hr class="thin">') },
-    { label: 'Actions', cls: 'cell-actions', cell: g => `${can('admin') ? `<button class="btn small primary" type="button" data-merge="${groups.indexOf(g)}">Merge</button>` : ''}${can('admin', 'manager') ? `<button class="btn small" type="button" data-notdup="${groups.indexOf(g)}">Not the same person</button>` : ''}` },
-  ], groups, { empty: 'No possible duplicates', emptyHint: can('admin') ? '' : 'Only the Admin can merge records.' });
+    { label: 'Actions', cls: 'cell-actions', cell: g => `${isAdmin() ? `<button class="btn small primary" type="button" data-merge="${groups.indexOf(g)}">Merge</button>` : ''}${wide() && canEdit('customers') ? `<button class="btn small" type="button" data-notdup="${groups.indexOf(g)}">Not the same person</button>` : ''}` },
+  ], groups, { empty: 'No possible duplicates', emptyHint: isAdmin() ? '' : 'Only the Admin can merge records.' });
   box.onclick = async e => {
     const m = e.target.closest('[data-merge]'); const nd = e.target.closest('[data-notdup]');
     const g = groups[Number((m || nd || {}).dataset?.merge ?? (m || nd || {}).dataset?.notdup)];
@@ -132,8 +132,8 @@ export async function renderProfile(page, { id }) {
   const isPlace = state.lists.places.includes(c.type);
   const kpi = (l, v, cls = '') => `<div class="kpi ${cls}"><span class="l">${esc(l)}</span><span class="v">${esc(v)}</span></div>`;
   page.innerHTML = `<div class="page-head"><div><h1>${esc(c.name)}</h1><div class="sub">${c.kind === 'Lead' ? 'Lead · ' : ''}${esc(c.code)} · ${esc(c.type)}${c.source ? ' · added from ' + esc(c.source) : ''}${c.phone ? ' · ' + esc(c.phone) : ''}${c.phone2 ? ' / ' + esc(c.phone2) : ''}${c.location ? ' · ' + esc(c.location) : ''}${c.contact_person ? ' · contact: ' + esc(c.contact_person) : ''}</div></div>
-      <div class="actions"><a class="btn" href="#/customers">All customers</a><button class="btn" type="button" id="edit-c">Edit details</button>${waLink(c.phone) ? '<button class="btn" type="button" id="wa-one">WhatsApp</button>' : ''}${can('admin', 'manager', 'telesales') ? '<button class="btn" type="button" id="call-one">Log a call</button>' : ''}
-        ${isPlace && can('admin', 'manager', 'onsite') ? '<button class="btn primary" type="button" id="visit-one">Record a visit</button>' : c.phone ? `<a class="btn primary" href="#/sales?new=1&phone=${encodeURIComponent(c.phone)}">Record a sale</a>` : ''}</div></div>
+      <div class="actions"><a class="btn" href="#/customers">All customers</a>${canEdit('customers') ? '<button class="btn" type="button" id="edit-c">Edit details</button>' : ''}${waLink(c.phone) ? '<button class="btn" type="button" id="wa-one">WhatsApp</button>' : ''}${canEdit('calls') ? '<button class="btn" type="button" id="call-one">Log a call</button>' : ''}
+        ${isPlace && canEdit('visits') ? '<button class="btn primary" type="button" id="visit-one">Record a visit</button>' : c.phone && canEdit('sales') ? `<a class="btn primary" href="#/sales?new=1&phone=${encodeURIComponent(c.phone)}">Record a sale</a>` : ''}</div></div>
     ${c.address ? `<p class="muted">${esc(c.address)}${c.pin ? ' · PIN ' + esc(c.pin) : ''}</p>` : ''}
     ${c.notes ? `<div class="notice info">${esc(c.notes)}</div>` : ''}
     ${c.needs && c.needs.length ? `<div class="notice warn"><strong>Update needed:</strong> ${c.needs.map(r => `${esc(r)}: ${esc(REASON_HELP[r])}`).join(' ')} Use <strong>Edit details</strong>${c.needs.some(r => r.startsWith('Name')) ? ', or confirm the name is right' : ''}.${c.needs.some(r => r.startsWith('Name')) && c.name !== 'Name not known' ? ' <button class="btn small" type="button" id="name-ok">Name is correct</button>' : ''}</div>` : ''}
@@ -174,7 +174,7 @@ export async function renderProfile(page, { id }) {
   page.querySelector('#c-sales').addEventListener('click', e => { const b = e.target.closest('[data-open]'); if (b) openSale(b.dataset.open, reload); });
   page.querySelector('#wa-one')?.addEventListener('click', () => whatsappDrawer([c]));
   page.querySelector('#name-ok')?.addEventListener('click', async () => { await api('PATCH', `/api/customers/${c.id}`, { name_ok: true }); toast('Name confirmed'); reload(); });
-  page.querySelector('#edit-c').addEventListener('click', () => drawer({
+  page.querySelector('#edit-c')?.addEventListener('click', () => drawer({
     title: `Edit ${c.name}`,
     body: html`<form id="c-form" novalidate>
       <div class="field"><label for="c-name">Customer name *</label><input id="c-name" name="name" required maxlength="150" value="${c.name}"></div>

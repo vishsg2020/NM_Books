@@ -1,7 +1,6 @@
 'use strict';
 // Corrections by the Admin: change a saved sale, change or remove a payment, remove a call, change or remove a visit.
 // Every correction needs a reason and is written to the history with the old and new values.
-const { requireRole } = require('../auth');
 const { audit } = require('../audit');
 const { moveStock, saleStock } = require('../stock');
 const { findOrCreateCustomer } = require('./customers');
@@ -10,11 +9,11 @@ const { bad, notFound, unprocessable, str, int, money, date, oneOf, idParam, tod
 
 const OPEN = ['Confirmed', 'Packing', 'Ready to Dispatch'];
 
-module.exports = (app, { db }) => {
+module.exports = (app, { db, requireAdmin }) => {
   const { paymentStatus } = require('./sales');
 
   // ── Change a saved sale ──────────────────────────────────────────────────
-  app.patch('/api/sales/:id', requireRole('admin'), async (req, res) => {
+  app.patch('/api/sales/:id', requireAdmin, async (req, res) => {
     const b = req.body; const id = idParam(req.params.id);
     const reason = str(b.reason, { required: true, name: 'Reason', max: 300 });
     const sale = await db.get('SELECT * FROM sales WHERE id = ?', [id]);
@@ -103,7 +102,7 @@ module.exports = (app, { db }) => {
     if (got > s.total_amount) throw bad(`That would make the payments ${inr(got)}, more than the sale total of ${inr(s.total_amount)}`, { field: 'Amount' });
     await t.run('UPDATE sales SET amount_received = ?, payment_status = ?, updated_at = now_iso() WHERE id = ?', [got, paymentStatus(s.total_amount, got, s.payment_method), saleId]);
   }
-  app.patch('/api/payments/:id', requireRole('admin'), async (req, res) => {
+  app.patch('/api/payments/:id', requireAdmin, async (req, res) => {
     const b = req.body; const before = await db.get('SELECT id, sale_id, amount, method, paid_on, note FROM payments WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Payment');
     const reason = str(b.reason, { required: true, name: 'Reason', max: 300 });
@@ -119,7 +118,7 @@ module.exports = (app, { db }) => {
     });
     res.json({ ok: true, sale_id: before.sale_id });
   });
-  app.delete('/api/payments/:id', requireRole('admin'), async (req, res) => {
+  app.delete('/api/payments/:id', requireAdmin, async (req, res) => {
     const before = await db.get('SELECT id, sale_id, amount, method, paid_on, note FROM payments WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Payment');
     const reason = str(req.body.reason, { required: true, name: 'Reason', max: 300 });
@@ -132,7 +131,7 @@ module.exports = (app, { db }) => {
   });
 
   // ── Remove a call logged by mistake (changing one is PATCH /api/calls/:id) ─
-  app.delete('/api/calls/:id', requireRole('admin'), async (req, res) => {
+  app.delete('/api/calls/:id', requireAdmin, async (req, res) => {
     const before = await db.get('SELECT * FROM calls WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Call');
     const reason = str(req.body.reason, { required: true, name: 'Reason', max: 300 });
@@ -145,7 +144,7 @@ module.exports = (app, { db }) => {
   });
 
   // ── Change or remove a visit ─────────────────────────────────────────────
-  app.patch('/api/visits/:id', requireRole('admin'), async (req, res) => {
+  app.patch('/api/visits/:id', requireAdmin, async (req, res) => {
     const b = req.body; const before = await db.get('SELECT id, visit_date, outcome, remarks, next_visit_date, contact_person, sale_id, next_visit_done_by FROM visits WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Visit');
     const reason = str(b.reason, { required: true, name: 'Reason', max: 300 });
@@ -162,7 +161,7 @@ module.exports = (app, { db }) => {
     });
     res.json({ ok: true });
   });
-  app.delete('/api/visits/:id', requireRole('admin'), async (req, res) => {
+  app.delete('/api/visits/:id', requireAdmin, async (req, res) => {
     const before = await db.get('SELECT * FROM visits WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Visit');
     const reason = str(req.body.reason, { required: true, name: 'Reason', max: 300 });

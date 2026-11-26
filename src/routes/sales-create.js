@@ -1,6 +1,7 @@
 'use strict';
 // POST /api/sales — the common sales entry for Tele-sales, Online and Onsite.
-const { requireRole, CHANNEL_OF } = require('../auth');
+const { CHANNEL_OF } = require('../auth');
+const { isWide } = require('../access');
 const { audit } = require('../audit');
 const { moveStock, saleStock } = require('../stock');
 const { findOrCreateCustomer, CUSTOMER_TYPES } = require('./customers');
@@ -11,10 +12,10 @@ const P = require('../prices');
 const MAX_CHARGE = 10000;
 const { bad, forbidden, conflict, str, int, money, date, oneOf, bool, idParam, today, inr } = require('../util');
 
-module.exports = (app, { db, load }) => {
-  const { paymentStatus, CHANNELS, METHODS, SELLERS } = require('./sales');
+module.exports = (app, { db, load, perm }) => {
+  const { paymentStatus, CHANNELS, METHODS } = require('./sales');
 
-  app.post('/api/sales', requireRole(...SELLERS), async (req, res) => {
+  app.post('/api/sales', perm('sales'), async (req, res) => {
     const b = req.body; const me = req.user; const lists = await getLists(db);
     const requestKey = str(b.request_key, { name: 'Request key', max: 80 });
     if (requestKey) {
@@ -30,7 +31,7 @@ module.exports = (app, { db, load }) => {
 
     // The sales person is the signed-in user; Admin and Manager may enter a sale for someone else.
     let salespersonId = me.id;
-    if (['admin', 'manager'].includes(me.role) && b.salesperson_id && Number(b.salesperson_id) !== me.id) {
+    if (isWide(me.role) && b.salesperson_id && Number(b.salesperson_id) !== me.id) {
       const sp = await db.get(`SELECT id FROM users WHERE id = ? AND active = 1 AND role <> 'dispatch'`, [idParam(b.salesperson_id)]);
       if (!sp) throw bad('Sales person not found', { field: 'Sales person' });
       salespersonId = sp.id;

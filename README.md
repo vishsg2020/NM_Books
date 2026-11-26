@@ -25,7 +25,7 @@ On first start the app creates the first Admin from the two `INITIAL_ADMIN_*` va
 ```bash
 npm run seed:demo
 LOCAL_DB_DIR=data/demo-pg npm start
-# admin@ / manager@ / tele@ / online@ / onsite@ / dispatch@demo.local — password: demo-password
+# admin@ / manager@ / tele@ / online@ / onsite@ / dispatch@ / viewer@demo.local — password: demo-password
 ```
 
 **Run the tests:** `npm test`
@@ -47,7 +47,8 @@ server.js               local entry point (loads .env, opens DB, applies migrati
 netlify/functions/api.js  the same Express app as a Netlify Function
 db/migrations/*.sql     numbered schema migrations (never edit an applied one; add a new file)
 src/db.js               pg adapter (? and @name placeholders), transactions
-src/auth.js             login, sessions, roles, throttling
+src/auth.js             login, sessions, throttling
+src/access.js           roles & access: areas, defaults, perm(area) check
 src/stock.js            the ONE place stock figures change
 src/audit.js            audit trail helper (old/new values, user, time, reason)
 src/routes/*.js         users, books, inventory, customers, sales (+ sales-create), dashboard
@@ -64,18 +65,27 @@ Deployment is the same as the school app: create a Supabase project, set `DATABA
 
 ## 3. Roles
 
-| Area | Admin | Manager | Tele-sales | Online | Onsite | Dispatch |
-|---|---|---|---|---|---|---|
-| Users | Manage | — | — | — | — | — |
-| Book Master | Add / edit | View | View | View | View | View |
-| Stock movements | Record + view | View | — | — | — | — |
-| Record a sale | Any channel | Any channel | Tele-sales | Online | Onsite | — |
-| See sales | All | All | Tele-sales | Online | Onsite | Orders to ship |
-| Record a payment | Yes | Yes | Own channel | Own channel | Own channel | — |
-| Packing / dispatch status | Yes | Yes | — | — | — | Yes |
-| Cancel an order | Yes | Yes | Own channel | Own channel | Own channel | — |
-| Customers | View / edit | View / edit | View / edit | View / edit | View / edit | — |
-| Dashboard | Business | Business | Own figures | Own figures | Own figures | Dispatch queue |
+One role per person: **Admin, Manager, Tele-sales, Online, Onsite, Dispatch, Report Viewer**. The Admin sets what each role can do in **Settings → Roles & access**: for each area, — (hidden), **View** (see, no changes) or **Edit** (see and change). The server checks this on every request (`src/access.js`, `perm(area)`: a GET needs View, anything else Edit); the menu shows only the areas a role can view, a page the role cannot view says "You do not have access", and a view-only page says so and hides its change buttons. The grid is saved in `settings` (key `role_access`) with an optional reason, and each change goes to the audit log. **Reset to defaults** puts back the table below.
+
+Defaults (the access each role had before Roles & access, plus the Report Viewer):
+
+| Area | Admin | Manager | Tele-sales | Online | Onsite | Dispatch | Report Viewer |
+|---|---|---|---|---|---|---|---|
+| Dashboard | Edit | View | View (own) | View (own) | View (own) | View | View |
+| Sales & payments (record, pay, cancel) | Edit | Edit | Edit (own) | Edit (own) | Edit (own) | View (own) | — |
+| Dispatch (order status, daily dispatch report) | Edit | Edit | — | — | — | Edit | — |
+| Customers | Edit | Edit | Edit | Edit | Edit | — | — |
+| Website orders | Edit | Edit | — | Edit | — | — | — |
+| Calls (and the tele-sales report) | Edit | Edit | Edit | — | — | — | — |
+| Visits | Edit | Edit | — | — | Edit | — | — |
+| Book Master | Edit | View | View | View | View | View | — |
+| Stock | Edit | View | — | — | — | — | — |
+| Costs & profit | Edit | View | — | — | — | — | — |
+| Reports (trends, tele-sales and dispatch reports, to read) | Edit | View | — | — | — | — | View |
+| Corrections (change a saved sale or payment, remove a call or visit, merge customers) | Admin only, fixed | | | | | | |
+| Users, roles & Settings | Admin only, fixed | | | | | | |
+
+"Own" is fixed by role, whatever the grid says: Tele-sales, Online and Onsite see their own channel's sales and dashboard figures; Dispatch sees the orders not yet completed. Admin and Report Viewer see every record, like the Manager. A few reads stay open to everyone signed in because every form needs them (the book list, the dropdown lists, your own account). Nobody can change their own role; changing someone's role or making them inactive signs them out at once; there is always at least one active Admin.
 
 Every sale, payment, stock movement and change records the employee who made it.
 

@@ -1,4 +1,4 @@
-import { get, esc, html, raw, inr, fmtDate, fmtMonth, pill, state, table, can, options, parseHash, setQuery, formData, qs, addDays } from '../core.js';
+import { get, esc, html, raw, inr, fmtDate, fmtMonth, pill, state, table, options, parseHash, setQuery, formData, qs, addDays, canEdit, canView } from '../core.js';
 import { columnChart, barList } from '../charts.js';
 
 const metric = (label, value, href, tone = '') =>
@@ -22,11 +22,11 @@ const lowStockTable = rows => table([
 export async function render(page) {
   const d = await get('/api/dashboard');
   // Monthly reminder: the website's orders are due for upload until someone uploads them this month.
-  const due = can('admin', 'manager', 'online') ? await get('/api/imports/website').catch(() => null) : null;
+  const due = canEdit('webimport') ? await get('/api/imports/website').catch(() => null) : null;
   const reminder = due && due.due ? `<div class="notice warn"><strong>Monthly reminder.</strong> Download the ${esc(due.month)} orders from the website and upload them here. Orders already in the app are ignored. <a href="#/webimport">Upload website orders</a></div>` : '';
   const m = d.metrics; const month = fmtMonth(d.month); const m1 = `${d.month}-01`;
   const head = `<div class="page-head"><div><h1>Good to see you, ${esc(state.me.name.split(' ')[0])}</h1><div class="sub">${esc(fmtDate(d.today))}</div></div>
-    ${can('admin', 'manager', 'telesales', 'online', 'onsite') ? (can('onsite') ? '<div class="actions"><a class="btn primary" href="#/visits?new=1">Record a visit</a></div>' : '<div class="actions"><a class="btn primary" href="#/sales?new=1">Record a sale</a></div>') : ''}</div>` + reminder;
+    ${canEdit('sales') && state.me.role !== 'dispatch' ? (state.me.role === 'onsite' && canEdit('visits') ? '<div class="actions"><a class="btn primary" href="#/visits?new=1">Record a visit</a></div>' : '<div class="actions"><a class="btn primary" href="#/sales?new=1">Record a sale</a></div>') : ''}</div>` + reminder;
   const dispatchGroup = () => group('Orders to dispatch', [
     metric('Awaiting packing', m.awaiting_packing, '#/sales?status=Confirmed', m.awaiting_packing ? 'attention' : ''),
     metric('Packing', m.packing, '#/sales?status=Packing'),
@@ -75,7 +75,7 @@ export async function render(page) {
       <section class="panel"><h2>Recent sales</h2>${recentTable(d.recent, true)}</section>
       <section class="panel"><h2>Low stock</h2>${lowStockTable(d.low_stock)}</section>
     </div>`;
-  await renderTrends(page.querySelector('#trends'), d.today);
+  if (canView('reports')) await renderTrends(page.querySelector('#trends'), d.today);
 }
 
 // ---------- Sales trends (charts) ----------

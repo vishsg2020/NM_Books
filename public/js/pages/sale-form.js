@@ -1,5 +1,5 @@
 // The common sales entry form for Tele-sales, Online and Onsite.
-import { api, get, esc, html, raw, inr, drawer, onSubmit, options, toast, can, state, myChannel, todayLocal, uid, debounce, fmtDate, STATES, districtField } from '../core.js';
+import { api, get, esc, html, raw, inr, drawer, onSubmit, options, toast, state, myChannel, todayLocal, uid, debounce, fmtDate, STATES, districtField, wide, canEdit, canView } from '../core.js';
 
 // The form has four shapes. Tele-sales and Online are orders; Exhibition is a sale at a book fair (saved as an Onsite sale);
 // Visit is a visit to a school or bookstore, opened from the Visits page.
@@ -62,13 +62,13 @@ function channelFields(ch, c, locations = []) {
 export async function saleForm({ customer = null, after = () => {}, callId = null, startChannel = null } = {}) {
   const fixed = myChannel();
   const books = (await get('/api/books?active=1')).sort((a, b) => a.name.localeCompare(b.name));
-  if (!books.length) { toast(can('admin') ? 'Add a book in the Book Master first.' : 'There are no active books yet. Ask the Admin to add them.', 'error'); return; }
+  if (!books.length) { toast(canEdit('books') ? 'Add a book in the Book Master first.' : 'There are no active books yet. Ask the Admin to add them.', 'error'); return; }
   const requestKey = uid(); // the same key on a repeated submit, so a double click saves one sale
   // `channel` is the shape of the form; an Exhibition or a Visit is saved under the Onsite channel.
   const visitMode = startChannel === 'Onsite';
   let channel = callId ? 'Tele-sales' : visitMode ? 'Onsite' : fixed === 'Onsite' ? 'Exhibition' : fixed || startChannel || 'Tele-sales';
   const charges = state.charges || {};
-  const locations = can('admin', 'manager', 'onsite') ? await get('/api/locations') : [];
+  const locations = canView('visits') ? await get('/api/locations') : [];
   let lineSeq = 0;
 
   drawer({
@@ -78,7 +78,7 @@ export async function saleForm({ customer = null, after = () => {}, callId = nul
       ${raw(fixed || visitMode ? '' : `<div class="seg" role="radiogroup" aria-label="Sales channel">${['Tele-sales', 'Online', 'Exhibition'].map(c => `<label><input type="radio" name="channel" value="${c}" ${c === channel ? 'checked' : ''}><span>${c}</span></label>`).join('')}</div>`)}
       <div class="grid2">
         <div class="field"><label for="s-date" id="s-date-l">Sales date</label><input id="s-date" name="sale_date" type="date" max="${todayLocal()}" value="${todayLocal()}"></div>
-        ${raw(can('admin', 'manager') ? `<div class="field"><label for="s-sp">Sales person</label><select id="s-sp" name="salesperson_id">${options(state.people.filter(p => p.active).map(p => [p.id, p.name]), state.me.id)}</select></div>` : '')}
+        ${raw(wide() ? `<div class="field"><label for="s-sp">Sales person</label><select id="s-sp" name="salesperson_id">${options(state.people.filter(p => p.active).map(p => [p.id, p.name]), state.me.id)}</select></div>` : '')}
       </div>
       <fieldset><legend id="s-cust-legend">Customer</legend><div id="s-channel"></div></fieldset>
       <fieldset><legend>Books</legend><div class="hint" id="s-books-hint"></div>

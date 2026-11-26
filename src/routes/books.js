@@ -1,5 +1,4 @@
 'use strict';
-const { requireRole } = require('../auth');
 const { audit, history } = require('../audit');
 const { moveStock } = require('../stock');
 const { bad, notFound, conflict, str, int, money, bool, oneOf, idParam } = require('../util');
@@ -27,7 +26,7 @@ function fields(b, base = {}) {
   return out;
 }
 
-module.exports = (app, { db }) => {
+module.exports = (app, { db, perm }) => {
   // Every book row leaves with its channel prices worked out from the discounts (null for books sold at MRP).
   const withPrices = async rows => { const d = await P.getDiscounts(db); for (const b of [].concat(rows)) if (b) b.prices = P.pricesOf(b, d); return rows; };
   async function assertUnique(f, exceptId = -1) {
@@ -66,7 +65,7 @@ module.exports = (app, { db }) => {
     return items;
   }
 
-  app.post('/api/books', requireRole('admin'), async (req, res) => {
+  app.post('/api/books', perm('books'), async (req, res) => {
     const f = fields(req.body);
     const kind = oneOf(req.body.kind, ['Book', 'Pack'], { name: 'Type' }) || 'Book';
     const items = kind === 'Pack' ? await packItems(req.body.items) : [];
@@ -84,7 +83,7 @@ module.exports = (app, { db }) => {
   });
 
   // Stock figures are never edited here; they change only through stock movements.
-  app.patch('/api/books/:id', requireRole('admin'), async (req, res) => {
+  app.patch('/api/books/:id', perm('books'), async (req, res) => {
     const before = await db.get('SELECT id, sku, name, category, kind, mrp, price, description, min_stock, active, discount_group FROM books WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Book');
     const next = fields(req.body, before);

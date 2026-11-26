@@ -1,11 +1,9 @@
 'use strict';
-const { requireRole } = require('../auth');
 const { audit } = require('../audit');
 const { getLists, getCharges, read, write } = require('../settings');
 const { bad, notFound, conflict, str, oneOf, idParam, normPhone } = require('../util');
 
 const TYPES = ['Individual', 'School', 'Bookstore', 'Other'];
-const VIEWERS = ['admin', 'manager', 'telesales', 'online', 'onsite'];
 
 /** Digits only, without a leading 0 or India's 91 country code, so "+91 98470 12345" matches "09847012345". */
 function phoneKey(p) {
@@ -115,7 +113,7 @@ async function findOrCreateCustomer(t, { name, phone, address, location, state, 
   return { id: r.id, created: true };
 }
 
-module.exports = (app, { db }) => {
+module.exports = (app, { db, perm, requireAdmin }) => {
   // "Has bought X": the customer owns the book, either bought on its own or inside a set. For a set, they own
   // every book in it (so a KVS Combo buyer counts as having bought KVS1 and KVS2). Cancelled orders do not count.
   const OWNS = bookExpr => `EXISTS (SELECT 1 FROM sales s JOIN sale_items i ON i.sale_id = s.id LEFT JOIN pack_items pk ON pk.pack_id = i.book_id
@@ -161,7 +159,7 @@ module.exports = (app, { db }) => {
     return { sql, p };
   }
 
-  app.get('/api/customers', requireRole(...VIEWERS), async (req, res) => {
+  app.get('/api/customers', perm('customers'), async (req, res) => {
     const { sql, p } = customerQuery(req.query, await getCharges(db), await getLists(db));
     const rows = await db.all(`${sql} LIMIT 501`, p);
     const { n } = await db.get(`SELECT COUNT(*) AS n FROM (${sql}) y`, p);
@@ -170,7 +168,7 @@ module.exports = (app, { db }) => {
 
   // The filtered customers as a file that Google Contacts can import (contacts.google.com → Import).
   // Admin and Manager only: it is the whole contact list in one download. Every download is logged.
-  app.get('/api/customers/google-contacts.csv', requireRole('admin', 'manager'), async (req, res) => {
+  app.get('/api/customers/google-contacts.csv', perm('customers', { wide: true }), async (req, res) => {
     const { sql, p } = customerQuery(req.query, await getCharges(db), await getLists(db));
     const rows = (await db.all(sql, p)).filter(c => c.phone_norm);
     const label = str(req.query.label, { name: 'Label', max: 60 }) || 'Nalla Malayalam Customers';
@@ -189,19 +187,19 @@ module.exports = (app, { db }) => {
   });
 
   // Used by the sales form: does this contact number already belong to a customer?
-  app.get('/api/customers/lookup', requireRole(...VIEWERS), async (req, res) => {
+  app.get('/api/customers/lookup', perm('customers'), async (req, res) => {
     const key = phoneKey(req.query.phone);
     if (key.length < 7) return res.json({ customer: null });
     const c = await db.get(`SELECT c.*, ${STATS} FROM customers c WHERE c.phone_norm = ? OR c.phone2_norm = ? ORDER BY (c.phone_norm = ?) DESC LIMIT 1`, [key, key, key]);
     res.json({ customer: c || null });
   });
 
-  app.get('/api/customers/locations', requireRole(...VIEWERS), async (_req, res) => {
+  app.get('/api/customers/locations', perm('customers'), async (_req, res) => {
     res.json((await db.all(`SELECT location FROM customers WHERE location IS NOT NULL AND kind = 'Customer' GROUP BY location HAVING COUNT(*) >= 3 ORDER BY location`)).map(r => r.location));
   });
 
   // What the "Update needed" tab shows besides the list: counts by reason, and the sales that have no customer record.
-  app.get('/api/customers/update-summary', requireRole(...VIEWERS), async (_req, res) => {
+  app.get('/api/customers/update-summary', perm('customers'), async (_req, res) => {
     const lists = await getLists(db);
     const counts = await db.all(`SELECT r AS reason, COUNT(*) AS n FROM customers c, unnest(${needsSql(lists.places)}) r GROUP BY r`);
     const { n } = await db.get(`SELECT COUNT(*) AS n FROM customers c WHERE cardinality(${needsSql(lists.places)}) > 0`);
@@ -214,7 +212,7 @@ module.exports = (app, { db }) => {
   });
 
   // Possibly the same person twice: same name (letters only) and the same PIN. Pairs marked "not the same person" are left out.
-  app.get('/api/customers/duplicates', requireRole(...VIEWERS), async (_req, res) => {
+  app.get('/api/customers/duplicates', perm('customers'), async (_req, res) => {
     const dismissed = new Set((await read(db, 'duplicates_dismissed')) || []);
     const groups = (await db.all(`SELECT array_agg(id ORDER BY id) AS ids FROM (
         SELECT c.id, lower(regexp_replace(c.name, '[^A-Za-z]', '', 'g')) AS nk, c.pin FROM customers c WHERE c.kind = 'Customer' AND c.pin ~ '^[1-9][0-9]{5}$') k
@@ -225,7 +223,7 @@ module.exports = (app, { db }) => {
     // The record kept on a merge: the one with more orders, then the older one.
     res.json(groups.map(g => g.map(id => byId.get(id)).sort((x, y) => y.total_orders - x.total_orders || x.id - y.id)));
   });
-  app.post('/api/customers/duplicates/dismiss', requireRole('admin', 'manager'), async (req, res) => {
+  app.post('/api/customers/duplicates/dismiss', perm('customers', { wide: true }), async (req, res) => {
     const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(idParam).filter(i => i > 0).sort((a, b) => a - b);
     if (ids.length < 2) throw bad('Choose the customers that are not the same person');
     const list = (await read(db, 'duplicates_dismissed')) || [];
@@ -234,7 +232,7 @@ module.exports = (app, { db }) => {
     res.json({ ok: true });
   });
   // Merge: the customer in the URL is kept; `other_id` is folded into it. Admin only, with a reason.
-  app.post('/api/customers/:id/merge', requireRole('admin'), async (req, res) => {
+  app.post('/api/customers/:id/merge', requireAdmin, async (req, res) => {
     const keepId = idParam(req.params.id); const otherId = idParam(req.body.other_id);
     const reason = str(req.body.reason, { name: 'Reason', max: 300 }) || 'Same person, two records';
     const r = await db.tx(t => mergeCustomers(t, keepId, otherId, req.user, reason));
@@ -242,7 +240,7 @@ module.exports = (app, { db }) => {
   });
 
   // Profile with the full purchase and payment history.
-  app.get('/api/customers/:id', requireRole(...VIEWERS), async (req, res) => {
+  app.get('/api/customers/:id', perm('customers'), async (req, res) => {
     const c = await db.get(`SELECT c.*, ${STATS}, ${needsSql((await getLists(db)).places)} AS needs FROM customers c WHERE c.id = ?`, [idParam(req.params.id)]);
     if (!c) throw notFound('Customer');
     const sales = await db.all(`SELECT s.id, s.sale_no, s.sale_date, s.channel, s.status, s.total_amount, s.amount_received,
@@ -261,7 +259,7 @@ module.exports = (app, { db }) => {
     res.json({ ...c, sales, payments, books, calls, visits });
   });
 
-  app.patch('/api/customers/:id', requireRole(...VIEWERS), async (req, res) => {
+  app.patch('/api/customers/:id', perm('customers'), async (req, res) => {
     const before = await db.get('SELECT id, name, phone, phone_norm, phone2, phone2_norm, address, location, state, pin, type, contact_person, name_ok FROM customers WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Customer');
     const b = req.body; const next = { ...before };

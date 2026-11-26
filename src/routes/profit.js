@@ -1,6 +1,5 @@
 'use strict';
 // Costs & profit: what each book or set costs, what is left at each price, and an estimate of profit on what was sold.
-const { requireRole } = require('../auth');
 const { audit } = require('../audit');
 const { getCostRules } = require('../settings');
 const { bad, notFound, idParam, isValidDate } = require('../util');
@@ -27,8 +26,8 @@ function unitCost(c, price, mode, rules) {
 const modeOf = (channel, platform) => (channel === 'Onsite' ? 'onsite' : channel === 'Online' ? (platform === 'Website' ? 'website' : 'amazon') : 'tele');
 const P = require('../prices');
 
-module.exports = (app, { db }) => {
-  app.get('/api/profit', requireRole('admin', 'manager'), async (req, res) => {
+module.exports = (app, { db, perm }) => {
+  app.get('/api/profit', perm('profit'), async (req, res) => {
     const q = req.query; const where = [`s.status <> 'Cancelled'`]; const p = {}; const rules = await getCostRules(db);
     if (q.date_from) { if (!isValidDate(q.date_from)) throw bad('From date is not valid'); where.push('s.sale_date >= @from'); p.from = q.date_from; }
     if (q.date_to) { if (!isValidDate(q.date_to)) throw bad('To date is not valid'); where.push('s.sale_date <= @to'); p.to = q.date_to; }
@@ -71,7 +70,7 @@ module.exports = (app, { db }) => {
     res.json({ rows, total, uncosted_revenue: uncosted, rules });
   });
 
-  app.put('/api/books/:id/costs', requireRole('admin'), async (req, res) => {
+  app.put('/api/books/:id/costs', perm('profit'), async (req, res) => {
     const book = await db.get('SELECT id FROM books WHERE id = ?', [idParam(req.params.id)]);
     if (!book) throw notFound('Book');
     const next = {};

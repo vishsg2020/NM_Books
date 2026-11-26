@@ -1,11 +1,10 @@
 'use strict';
+const { isWide } = require('../access');
 // Onsite visits: every visit to a school, bookstore or exhibition, with or without a sale; saved locations; next visits.
-const { requireRole } = require('../auth');
 const { findOrCreateCustomer, phoneKey } = require('./customers');
 const { bad, notFound, str, date, oneOf, idParam, isValidDate, today } = require('../util');
 const { getLists } = require('../settings');
 
-const VISITORS = ['admin', 'manager', 'onsite'];
 const TYPES = ['School', 'Bookstore', 'Exhibition'];
 const LIST = `v.id, v.visit_no, v.visit_date, v.salesperson_id, u.name AS salesperson_name, v.customer_id, v.location_type, v.location_name, v.address, v.contact_person, v.contact_phone,
   v.outcome, v.remarks, v.next_visit_date, v.next_visit_done_by, v.sale_id, s.sale_no, s.total_amount AS sale_amount, (s.total_amount - s.amount_received) AS sale_balance, s.status AS sale_status`;
@@ -63,11 +62,11 @@ async function readLocation(db, b) {
   };
 }
 
-module.exports = (app, { db }) => {
-  const isManager = u => ['admin', 'manager'].includes(u.role);
+module.exports = (app, { db, perm }) => {
+  const isManager = u => isWide(u.role); // Admin, Manager, Report Viewer: every record
 
   // Saved schools and bookstores, for the picker on the visit form.
-  app.get('/api/locations', requireRole(...VISITORS), async (_req, res) => {
+  app.get('/api/locations', perm('visits'), async (_req, res) => {
     res.json(await db.all(`SELECT c.id, c.name, c.type, c.phone, c.address, c.contact_person,
         (SELECT COALESCE(SUM(s.total_amount - s.amount_received),0) FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled') AS outstanding,
         (SELECT MAX(v.visit_date) FROM visits v WHERE v.customer_id = c.id) AS last_visit,
@@ -75,7 +74,7 @@ module.exports = (app, { db }) => {
       FROM customers c WHERE c.type = ANY(?::text[]) ORDER BY lower(c.name) LIMIT 2000`, [(await getLists(db)).places]));
   });
 
-  app.get('/api/visits', requireRole(...VISITORS), async (req, res) => {
+  app.get('/api/visits', perm('visits'), async (req, res) => {
     const q = req.query; const where = []; const p = {};
     if (q.salesperson) { where.push('v.salesperson_id = @sp'); p.sp = idParam(q.salesperson); }
     if (q.customer_id) { where.push('v.customer_id = @cust'); p.cust = idParam(q.customer_id); }
@@ -92,7 +91,7 @@ module.exports = (app, { db }) => {
   });
 
   // Next visits still to be made: overdue, due today, upcoming. The onsite team sees its own.
-  app.get('/api/visits/due', requireRole(...VISITORS), async (req, res) => {
+  app.get('/api/visits/due', perm('visits'), async (req, res) => {
     const p = { today: today() }; let who = '';
     if (!isManager(req.user)) { who = 'AND v.salesperson_id = @sp'; p.sp = req.user.id; }
     else if (req.query.salesperson) { who = 'AND v.salesperson_id = @sp'; p.sp = idParam(req.query.salesperson); }
@@ -103,7 +102,7 @@ module.exports = (app, { db }) => {
   });
 
   // A visit with no sale. (A visit with books goes through POST /api/sales, which records the visit too.)
-  app.post('/api/visits', requireRole(...VISITORS), async (req, res) => {
+  app.post('/api/visits', perm('visits'), async (req, res) => {
     const b = req.body; const me = req.user;
     const requestKey = str(b.request_key, { name: 'Request key', max: 80 });
     if (requestKey) {

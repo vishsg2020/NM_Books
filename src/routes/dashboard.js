@@ -3,13 +3,13 @@ const { CHANNEL_OF } = require('../auth');
 const { today, thisMonth } = require('../util');
 
 // Figures come straight from the sales, payment and stock records. Cancelled orders never count.
-module.exports = (app, { db }) => {
-  app.get('/api/dashboard', async (req, res) => {
+module.exports = (app, { db, perm }) => {
+  app.get('/api/dashboard', perm('dashboard'), async (req, res) => {
     const me = req.user; const day = today(); const month = thisMonth();
     const out = { role: me.role, today: day, month, metrics: {} };
     const m = out.metrics;
 
-    if (['admin', 'manager', 'dispatch'].includes(me.role)) {
+    if (['admin', 'manager', 'viewer', 'dispatch'].includes(me.role)) {
       const d = await db.get(`SELECT
           COUNT(*) FILTER (WHERE status = 'Confirmed') AS awaiting_packing,
           COUNT(*) FILTER (WHERE status = 'Packing') AS packing,

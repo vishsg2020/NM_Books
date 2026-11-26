@@ -1,6 +1,6 @@
 'use strict';
+const { isWide } = require('../access');
 // Tele-sales call management: individual call records, follow-ups and the day/week/month report.
-const { requireRole } = require('../auth');
 const { audit, history } = require('../audit');
 const { getLists } = require('../settings');
 const { findOrCreateCustomer, phoneKey } = require('./customers');
@@ -8,7 +8,6 @@ const { bad, notFound, forbidden, str, date, oneOf, idParam, isValidDate, isVali
 
 const STATUSES = ['Answered', 'Not Answered', 'Busy', 'Switched Off', 'Wrong Number'];
 const OUTCOMES = ['Interested', 'Not Interested', 'Follow-up', 'Sale'];
-const CALLERS = ['admin', 'manager', 'telesales'];
 const PERIOD = { day: 'call_date', week: `to_char(date_trunc('week', call_date::date), 'YYYY-MM-DD')`, month: 'substr(call_date, 1, 7)' };
 const SALE_PERIOD = { day: 's.sale_date', week: `to_char(date_trunc('week', s.sale_date::date), 'YYYY-MM-DD')`, month: 'substr(s.sale_date, 1, 7)' };
 const PAY_PERIOD = { day: 'p.paid_on', week: `to_char(date_trunc('week', p.paid_on::date), 'YYYY-MM-DD')`, month: 'substr(p.paid_on, 1, 7)' };
@@ -17,8 +16,8 @@ const LIST = `c.id, c.call_no, c.called_at, c.call_date, c.salesperson_id, u.nam
   c.status, c.outcome, c.remarks, c.followup_at, c.followup_date, c.followup_done_by, c.sale_id, s.sale_no, s.total_amount AS sale_amount`;
 const FROM = `FROM calls c JOIN users u ON u.id = c.salesperson_id JOIN customers cu ON cu.id = c.customer_id LEFT JOIN sales s ON s.id = c.sale_id`;
 
-module.exports = (app, { db }) => {
-  const isManager = u => ['admin', 'manager'].includes(u.role);
+module.exports = (app, { db, perm }) => {
+  const isManager = u => isWide(u.role); // Admin, Manager, Report Viewer: every record
 
   function followup(b, outcome) {
     const d = date(b.followup_date, { name: 'Next follow-up date', required: outcome === 'Follow-up' });
@@ -29,7 +28,7 @@ module.exports = (app, { db }) => {
   }
 
   // ── Calls list ───────────────────────────────────────────────────────────
-  app.get('/api/calls', requireRole(...CALLERS), async (req, res) => {
+  app.get('/api/calls', perm('calls'), async (req, res) => {
     const q = req.query; const where = []; const p = {};
     // A sales person sees their own calls; a customer's full call history is on the customer profile.
     if (!isManager(req.user)) { where.push('c.salesperson_id = @me'); p.me = req.user.id; }
@@ -51,7 +50,7 @@ module.exports = (app, { db }) => {
   });
 
   // ── Follow-ups still to be made: overdue, due today, upcoming ────────────
-  app.get('/api/calls/followups', requireRole(...CALLERS), async (req, res) => {
+  app.get('/api/calls/followups', perm('calls'), async (req, res) => {
     const p = { today: today() }; let who = '';
     if (!isManager(req.user)) { who = 'AND c.salesperson_id = @sp'; p.sp = req.user.id; }
     else if (req.query.salesperson) { who = 'AND c.salesperson_id = @sp'; p.sp = idParam(req.query.salesperson); }
@@ -61,7 +60,7 @@ module.exports = (app, { db }) => {
   });
 
   // ── Day / week / month report, built from the call and sale records ──────
-  app.get('/api/calls/report', requireRole(...CALLERS), async (req, res) => {
+  app.get('/api/calls/report', perm(['calls', 'reports']), async (req, res) => {
     const q = req.query;
     const from = date(q.date_from, { name: 'From date', required: true }), to = date(q.date_to, { name: 'To date', required: true });
     if (from > to) throw bad('The From date is after the To date');
@@ -99,7 +98,7 @@ module.exports = (app, { db }) => {
   });
 
   // ── Log a call ───────────────────────────────────────────────────────────
-  app.post('/api/calls', requireRole(...CALLERS), async (req, res) => {
+  app.post('/api/calls', perm('calls'), async (req, res) => {
     const b = req.body; const me = req.user;
     const requestKey = str(b.request_key, { name: 'Request key', max: 80 });
     if (requestKey) {
@@ -135,7 +134,7 @@ module.exports = (app, { db }) => {
   });
 
   // ── Correct a call: your own on the same day; Manager and Admin any time ─
-  app.patch('/api/calls/:id', requireRole(...CALLERS), async (req, res) => {
+  app.patch('/api/calls/:id', perm('calls'), async (req, res) => {
     const before = await db.get('SELECT id, salesperson_id, call_date, status, outcome, remarks, followup_at, followup_date, followup_done_by FROM calls WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Call');
     if (!isManager(req.user)) {

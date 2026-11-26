@@ -77,7 +77,7 @@ const PILL = {
   'Tele-sales': '', Online: '', Onsite: '',
 };
 export const pill = (text, cls) => raw(`<span class="pill ${cls ?? PILL[text] ?? ''}">${esc(text)}</span>`);
-export const ROLES = [['telesales', 'Tele-sales Team'], ['online', 'Online Sales Team'], ['onsite', 'Onsite Sales Team'], ['dispatch', 'Dispatch Team'], ['manager', 'Manager'], ['admin', 'Admin']];
+export const ROLES = [['telesales', 'Tele-sales Team'], ['online', 'Online Sales Team'], ['onsite', 'Onsite Sales Team'], ['dispatch', 'Dispatch Team'], ['viewer', 'Report Viewer'], ['manager', 'Manager'], ['admin', 'Admin']];
 export const roleName = r => (ROLES.find(x => x[0] === r) || [r, r])[1];
 /** The one channel a channel role sells in (undefined for Admin and Manager, who can use all three). */
 export const myChannel = () => ({ telesales: 'Tele-sales', online: 'Online', onsite: 'Onsite' }[state.me?.role]);
@@ -220,11 +220,21 @@ export function setQuery(q) {
 }
 export const qs = obj => { const s = new URLSearchParams(Object.entries(obj).filter(([, v]) => v !== '' && v != null)).toString(); return s ? '?' + s : ''; };
 export const can = (...roles) => state.me && roles.includes(state.me.role);
+// ---------- Roles & access ----------
+// state.me.perms comes from the server: { area: 'none' | 'view' | 'edit' }. The server checks the same on every request;
+// these only decide what the menu and buttons show.
+const LV = { none: 0, view: 1, edit: 2 };
+const level = a => [].concat(a).reduce((m, x) => Math.max(m, LV[(state.me?.perms || {})[x]] || 0), 0);
+export const canView = a => level(a) >= 1;
+export const canEdit = a => level(a) >= 2;
+export const isAdmin = () => state.me?.role === 'admin';
+/** Admin, Manager and Report Viewer see every record; the other roles only their own. */
+export const wide = () => ['admin', 'manager', 'viewer'].includes(state.me?.role);
 
 export async function loadLookups() {
   state.books = await get('/api/books');
   const st = await get('/api/settings/lists'); state.lists = st.lists; state.locked = st.locked; state.listNames = st.names; state.charges = st.charges || {}; state.discounts = st.discounts || {}; state.discountGroups = st.discount_groups || []; state.discountChannels = st.discount_channels || []; state.themes = st.themes || []; applyTheme(st.theme);
-  state.people = can('admin', 'manager') ? await get('/api/users/salespeople') : [];
+  state.people = wide() ? await get('/api/users/salespeople') : [];
 }
 /** Debounces a handler (search boxes). */
 export function debounce(fn, ms = 250) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }

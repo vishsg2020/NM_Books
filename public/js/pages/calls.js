@@ -1,12 +1,12 @@
 // Tele-sales: log calls, work through follow-ups, and see the day / week / month report.
-import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, can, fmtDate, fmtDT, parseHash, setQuery, wireFilters, formData, qs, state, todayLocal, addDays, uid, debounce, reasonBox } from '../core.js';
+import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, fmtDate, fmtDT, parseHash, setQuery, wireFilters, formData, qs, state, todayLocal, addDays, uid, debounce, reasonBox, wide, canEdit, isAdmin } from '../core.js';
 import { saleForm } from './sale-form.js';
 
 const statuses = () => state.lists.call_statuses; const outcomes = () => state.lists.call_outcomes;
 const tone = { Answered: 'green', 'Not Answered': 'amber', Busy: 'amber', 'Switched Off': '', 'Wrong Number': 'red', Interested: 'green', 'Not Interested': '', 'Follow-up': 'blue', Sale: 'green', Overdue: 'red', Today: 'amber', Upcoming: '' };
 const cpill = t => (t ? pill(t, tone[t] ?? '').__raw : '');
 const fuText = c => (c.followup_at ? (c.followup_at.endsWith('T00:00') ? fmtDate(c.followup_date) : fmtDT(c.followup_at)) : '');
-const manager = () => can('admin', 'manager');
+const manager = () => wide();
 
 /** Table of calls, used on the Calls page and on a customer's profile. */
 export function callsTable(rows, { person = true, who = true, empty = 'No calls yet' } = {}) {
@@ -18,8 +18,8 @@ export function callsTable(rows, { person = true, who = true, empty = 'No calls 
     { label: 'Follow-up', cell: c => (c.followup_at ? `${esc(fuText(c))}<span class="sub">${c.followup_done_by ? 'Completed' : 'Pending'}</span>` : '') },
     ...(person ? [{ label: 'By', cell: c => esc(c.salesperson_name) }] : []),
     // Correct a call: your own on the day it was made; Manager and Admin any time. Only the Admin can remove one.
-    { label: 'Actions', cls: 'cell-actions', cell: c => (manager() || (c.salesperson_id === state.me.id && c.call_date === todayLocal()) ? `<button class="btn small" type="button" data-call-edit="${c.id}">Edit</button>` : '') +
-      (can('admin') ? `<button class="btn small danger" type="button" data-call-del="${c.id}">Remove</button>` : '') },
+    { label: 'Actions', cls: 'cell-actions', cell: c => (canEdit('calls') && (manager() || c.salesperson_id === state.me.id && c.call_date === todayLocal()) ? `<button class="btn small" type="button" data-call-edit="${c.id}">Edit</button>` : '') +
+      (isAdmin() ? `<button class="btn small danger" type="button" data-call-del="${c.id}">Remove</button>` : '') },
   ], rows, { empty, emptyHint: '' });
 }
 
@@ -58,7 +58,7 @@ function editCallForm(c, after) {
 
 export async function renderList(page, { query }) {
   page.innerHTML = html`<div class="page-head"><div><h1>Calls</h1><div class="sub">${manager() ? 'Every call made by the tele-sales team.' : 'Your calls and the follow-ups waiting for you.'}</div></div>
-      <div class="actions"><a class="btn" href="#/callreport">Report</a><button class="btn primary" type="button" id="add-call">Log a call</button></div></div>
+      <div class="actions"><a class="btn" href="#/callreport">Report</a>${canEdit('calls') ? '<button class="btn primary" type="button" id="add-call">Log a call</button>' : ''}</div></div>
     <section class="panel" id="fu-panel"><h2>Follow-ups to make</h2><div id="fu"></div></section>
     <form class="filters top-gap" id="cl-filters">
       <div class="field grow"><label for="cf-q">Search</label><input id="cf-q" name="q" type="search" placeholder="Name, phone or remarks" value="${query.q}"></div>
@@ -90,7 +90,7 @@ export async function renderList(page, { query }) {
   const reload = async () => { await Promise.all([loadFu(), load()]); };
   wireFilters(page.querySelector('#cl-filters'), reload);
   wireCallActions(page.querySelector('#cl-list'), () => shownCalls, reload);
-  page.querySelector('#add-call').addEventListener('click', () => callForm({ after: reload }));
+  page.querySelector('#add-call')?.addEventListener('click', () => callForm({ after: reload }));
   page.querySelector('#fu').addEventListener('click', e => { const b = e.target.closest('[data-call]'); if (b) callForm({ phone: b.dataset.call, name: b.dataset.name, after: reload }); });
   await reload();
   if (query.new) { const q = { ...parseHash().query }; delete q.new; delete q.phone; setQuery(q); callForm({ phone: query.phone, after: reload }); }
