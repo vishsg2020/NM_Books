@@ -78,10 +78,13 @@ async function main() {
     }
     // 2. Names that start with a label or punctuation.
     for (const c of next.values()) {
-      let n = c.name.normalize('NFKC').replace(/^[^\p{L}\p{N}]+/u, '').replace(/^name\s*[:\-–.]+\s*/i, '');
+      // Not a person's name at all (a bank detail or the address template pasted in): left as it is for Update needed.
+      if (/account\s*(number|no)|ifsc|address\s*format/i.test(c.name)) continue;
+      let n = c.name.normalize('NFKC').replace(/^[^\p{L}\p{N}]+/u, '').replace(/^(my\s+)?(name|address)\s*[:\-–.]+\s*/i, '');
       // "Fida Fathima K Address: Karanathil (h) ..." — the address part goes to the address.
       const at = n.search(/\baddress\s*[:\-–]/i);
       if (at > 1) { const rest = tidyText(n.slice(at).replace(/^address\s*[:\-–]+\s*/i, '')); n = n.slice(0, at); if (rest && !(c.address || '').toLowerCase().includes(rest.toLowerCase().slice(0, 15))) c.address = [rest, c.address].filter(Boolean).join(', ').slice(0, 500); }
+      if (!n.includes('(')) n = n.replace(/\)+/g, ''); // "(Farsana P)" lost its "(" above
       n = n.replace(/["“”'‘’*]+$/u, '').replace(/[\s,;:\-–]+$/, '').replace(/\.{2,}$/, '.').replace(/\s+/g, ' ').trim();
       if (n !== c.name && n.length >= 2) { out.names.push(`${c.code}: "${c.name.slice(0, 40)}" → "${n.slice(0, 40)}"`); c.name = n; }
     }
@@ -133,10 +136,12 @@ async function main() {
     const changed = rows.filter(r => FIELDS.some(f => (r[f] || null) !== (next.get(r.id)[f] || null)));
     out.changed = changed.length;
     if (apply && changed.length) {
-      // In batches: one statement per 200 customers keeps thousands of changes to seconds.
-      await db.tx(async t => {
-        for (let i = 0; i < changed.length; i += 200) {
-          const part = changed.slice(i, i + 200);
+      // In batches of 100, each saved on its own: if the connection drops, the batches already done stay saved and
+      // running the tidy again carries on with the rest.
+      for (let i = 0; i < changed.length; i += 100) {
+        const part = changed.slice(i, i + 100);
+        process.stdout.write(`\rSaving changes ${Math.min(i + 100, changed.length)} / ${changed.length} `);
+        await db.tx(async t => {
           await t.run(`UPDATE customers c SET name = v.name, address = v.address, location = v.location, state = v.state, notes = v.notes, updated_at = now_iso()
             FROM (VALUES ${part.map(() => '(?::int, ?, ?, ?, ?, ?)').join(', ')}) AS v(id, name, address, location, state, notes) WHERE c.id = v.id`,
           part.flatMap(r => { const n = next.get(r.id); return [r.id, n.name, n.address, n.location, n.state, n.notes]; }));
@@ -146,8 +151,9 @@ async function main() {
               for (const f of FIELDS) if ((r[f] || null) !== (n[f] || null)) { before[f] = r[f]; after[f] = n[f]; }
               return [admin.id, r.id, JSON.stringify(before), JSON.stringify(after)];
             }));
-        }
-      });
+        });
+      }
+      process.stdout.write('\n');
     }
     // 6. Same person, two records: the same name (letters only) and the same PIN.
     const groups = await db.all(`SELECT array_agg(id ORDER BY id) AS ids FROM (
@@ -159,6 +165,7 @@ async function main() {
       const info = await db.all(`SELECT c.id, c.code, c.name, c.phone, (SELECT COUNT(*) FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled') AS orders FROM customers c WHERE c.id = ANY(?::int[])`, [ids]);
       info.sort((x, y) => y.orders - x.orders || x.id - y.id);
       out.merged.push(`${info[0].code} ${info[0].name} (${info.map(i => i.phone).join(' + ')})`);
+      if (apply) process.stdout.write(`\rMerging ${out.merged.length} `);
       if (apply) await db.tx(async t => { for (const o of info.slice(1)) await mergeCustomers(t, info[0].id, o.id, { id: admin.id }, 'Customer list tidy: same name and PIN'); });
     }
     if (apply) await db.run(`INSERT INTO audit_events (user_id, entity, action, after_json) VALUES (?, 'import', 'customers_tidied', ?)`, [admin.id, JSON.stringify({ ...out, names: out.names.length, merged: out.merged.length })]);
