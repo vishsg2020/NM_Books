@@ -11,9 +11,15 @@ module.exports = (app, { db, perm, requireAdmin }) => {
   // Everyone signed in needs the lists to fill the forms.
   app.get('/api/settings/lists', async (_req, res) => {
     res.json({ lists: await S.getLists(db), locked: S.LOCKED, names: S.LIST_NAMES, charges: await S.getCharges(db),
-      discounts: await P.getDiscounts(db), discount_groups: P.GROUPS, discount_channels: P.CHANNELS, theme: await getTheme(db), themes: THEMES });
+      discounts: await P.getDiscounts(db), discount_groups: P.GROUPS, discount_channels: P.CHANNELS, theme: await getTheme(db), themes: THEMES,
+      messages: await S.getMessages(db), message_kinds: S.MESSAGE_KINDS, message_fields: S.MESSAGE_FIELDS });
   });
 
+  app.put('/api/settings/messages', requireAdmin, async (req, res) => {
+    const before = await S.getMessages(db); const next = S.cleanMessages(req.body);
+    await db.tx(async t => { await S.write(t, 'messages', next); await audit(t, req.user, 'settings', null, 'messages_changed', before, next); });
+    res.json(await S.getMessages(db));
+  });
   app.put('/api/settings/discounts', requireAdmin, async (req, res) => {
     const before = await P.getDiscounts(db); const next = P.cleanDiscounts(req.body);
     await db.tx(async t => { await S.write(t, 'discounts', next); await audit(t, req.user, 'settings', null, 'discounts_changed', before, next); });

@@ -601,3 +601,51 @@ select.lv-view { background: var(--blue-soft); border-color: #9DB8D6; color: #1E
   .ac-desk { display: none; }
   .ac-phone { display: block; }
 }
+
+/* ---------- Follow-up lists, WhatsApp messages, feedback ---------- */
+.span2 { grid-column: 1 / -1; }
+.stat-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 14px; }
+.stat { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--paper); min-width: 118px; text-decoration: none; color: var(--ink); }
+.stat:hover, .stat.on { border-color: var(--green); }
+.stat.on { box-shadow: 0 0 0 2px var(--green-soft); }
+.stat b { display: block; font-size: 20px; }
+.stat span { font-size: 12.5px; color: var(--muted); }
+.msg-types { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+.msg-type { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; gap: 8px; align-items: flex-start; background: var(--paper); cursor: pointer; }
+.msg-type:has(input:checked) { border-color: var(--green); box-shadow: 0 0 0 2px var(--green-soft); }
+.msg-type input { margin-top: 3px; }
+.msg-type small { display: block; color: var(--muted); }
+.fb-card { border-bottom: 1px solid var(--line); padding: 8px 0; }
+.fb-card blockquote { margin: 4px 0 0; padding-left: 10px; border-left: 3px solid var(--brand); color: var(--ink); }
+.stars-s { color: #B7791F; letter-spacing: 1px; }
+.hbars { display: grid; gap: 6px; }
+.hbar { display: grid; grid-template-columns: minmax(90px, 40%) 1fr 44px; gap: 8px; align-items: center; font-size: 13.5px; }
+.hbar .b { background: var(--green-soft); border-radius: 4px; height: 12px; overflow: hidden; }
+.hbar .b i { display: block; height: 100%; background: var(--brand); width: 0; }
+.hbar .v { text-align: right; color: var(--muted); }
+ul.plain { list-style: none; padding: 0; margin: 4px 0; }
+ul.plain li { padding: 3px 0; }
+@media (max-width: 760px) { .msg-types { grid-template-columns: 1fr; } }
+
+/* The public feedback page (/f/<token>). */
+.fb-page { background: var(--bg, #FAF8F3); }
+.fb { max-width: 440px; margin: 0 auto; padding: 22px 18px 40px; }
+.fb h1 { font-size: 22px; text-align: center; margin: 6px 0 10px; }
+.fb .center { text-align: center; }
+.fb-brand { display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--green); font-weight: 700; margin-bottom: 8px; }
+.fb-stars { border: 0; padding: 0; margin: 6px 0 0; display: flex; justify-content: center; gap: 4px; }
+.fb-stars button { font-size: 42px; line-height: 1; background: none; border: 0; padding: 4px; color: #D8D8D2; cursor: pointer; min-height: 48px; min-width: 48px; }
+.fb-stars button.on { color: #E3A008; }
+.fb-stars.big { font-size: 40px; color: #E3A008; letter-spacing: 4px; text-align: center; display: block; }
+.fb-stars.big .off { color: #D8D8D2; }
+.fb .label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+.choice { display: flex; flex-wrap: wrap; gap: 6px; }
+.choice label { cursor: pointer; }
+.choice input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.choice span { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 7px 12px; font-size: 14px; background: #fff; }
+.choice input:checked + span { background: var(--green-soft); border-color: var(--green); color: var(--green); font-weight: 600; }
+.choice input:focus-visible + span { outline: 3px solid var(--green); outline-offset: 2px; }
+.btn.block { width: 100%; justify-content: center; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .grid-3 { grid-template-columns: 1fr; } }
+.grid-3 > .panel + .panel { margin-top: 0; }

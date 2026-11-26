@@ -101,7 +101,7 @@ export const drawerGeneration = () => drawerGen;
  * Opens a side drawer. `body` is HTML; `onMount(el, close)` wires behaviour.
  * Returns a close function.
  */
-export function drawer({ title, body, foot = '', onMount, wide = false }) {
+export function drawer({ title, body, foot = '', onMount, onClose, wide = false }) {
   closeDrawer();
   drawerGen++;
   const back = document.createElement('div'); back.className = 'drawer-backdrop';
@@ -111,7 +111,7 @@ export function drawer({ title, body, foot = '', onMount, wide = false }) {
   d.innerHTML = `<div class="drawer-head"><h2 id="drawer-title">${esc(title)}</h2><button class="close-x" type="button" aria-label="Close">×</button></div>
     <div class="drawer-body">${body}</div>${foot ? `<div class="drawer-foot">${foot}</div>` : ''}`;
   const prevFocus = document.activeElement;
-  const close = () => { back.remove(); d.remove(); document.removeEventListener('keydown', onKey); openDrawer = null; drawerGen++; prevFocus && prevFocus.focus && prevFocus.focus(); };
+  const close = () => { back.remove(); d.remove(); document.removeEventListener('keydown', onKey); openDrawer = null; drawerGen++; prevFocus && prevFocus.focus && prevFocus.focus(); onClose && onClose(); };
   const onKey = e => {
     if (e.key === 'Escape') close();
     if (e.key === 'Tab') { // keep focus inside
@@ -233,7 +233,7 @@ export const wide = () => ['admin', 'manager', 'viewer'].includes(state.me?.role
 
 export async function loadLookups() {
   state.books = await get('/api/books');
-  const st = await get('/api/settings/lists'); state.lists = st.lists; state.locked = st.locked; state.listNames = st.names; state.charges = st.charges || {}; state.discounts = st.discounts || {}; state.discountGroups = st.discount_groups || []; state.discountChannels = st.discount_channels || []; state.themes = st.themes || []; applyTheme(st.theme);
+  const st = await get('/api/settings/lists'); state.lists = st.lists; state.locked = st.locked; state.listNames = st.names; state.charges = st.charges || {}; state.discounts = st.discounts || {}; state.discountGroups = st.discount_groups || []; state.discountChannels = st.discount_channels || []; state.themes = st.themes || []; state.messages = st.messages || { templates: {} }; state.messageKinds = st.message_kinds || []; state.messageFields = st.message_fields || []; applyTheme(st.theme);
   state.people = wide() ? await get('/api/users/salespeople') : [];
 }
 /** Debounces a handler (search boxes). */

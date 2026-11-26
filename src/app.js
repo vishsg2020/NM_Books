@@ -49,6 +49,9 @@ function createApp(db) {
   // The colour theme, before sign-in too (the sign-in page uses it). Not secret.
   app.get('/api/theme', async (_req, res) => { res.set('Cache-Control', 'no-cache'); res.json({ name: await require('./routes/settings').getTheme(db) }); });
 
+  // The customer feedback page: public, no sign-in. Each link carries one customer's random token.
+  require('./routes/followups').publicRoutes(app, db);
+  app.get('/f/:token', (_req, res) => { res.set('Cache-Control', 'no-cache'); res.sendFile(path.join(__dirname, '..', 'public', 'feedback.html')); });
   app.use('/api', requireAuth);
   app.use('/api', (req, _res, next) => { if (req.body === undefined) req.body = {}; next(); });
   require('./routes/users')(app, ctx);

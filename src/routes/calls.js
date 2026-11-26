@@ -128,6 +128,8 @@ module.exports = (app, { db, perm }) => {
         VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, ['CL-' + String(n).padStart(6, '0'), calledAt, calledAt.slice(0, 10), me.id, cust.id, status, outcome, remarks, fAt, fDate, requestKey]);
       // Calling the person again completes any follow-up that was waiting for them.
       await t.run('UPDATE calls SET followup_done_by = ?, updated_at = now_iso() WHERE customer_id = ? AND id <> ? AND followup_date IS NOT NULL AND followup_done_by IS NULL', [c.id, cust.id, c.id]);
+      // In the customer's open follow-up lists: an answered call is "Contacted", any other "No answer" (never moving them back).
+      await require('./followups').bumpLists(t, cust.id, status === 'Answered' ? 'Contacted' : 'No answer', me.id);
       return c.id;
     });
     res.status(201).json(await db.get(`SELECT ${LIST} ${FROM} WHERE c.id = ?`, [id]));

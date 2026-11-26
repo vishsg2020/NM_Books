@@ -46,6 +46,12 @@ async function renderGeneral(page) {
       <form id="f-disc" novalidate><div class="table-wrap"><table class="responsive"><thead><tr><th scope="col">Set</th>${raw(chans.map(([, l]) => `<th scope="col" class="num">${esc(l)} (%)</th>`).join(''))}</tr></thead>
         <tbody>${raw(groups.map(([g, gl]) => `<tr><td data-label="Set"><div>${esc(gl)}</div></td>${chans.map(([c, cl]) => `<td class="num" data-label="${esc(cl)}"><div><input class="pct" name="${g}:${c}" type="number" inputmode="decimal" min="0" max="90" step="0.5" aria-label="${esc(gl)}, ${esc(cl)}" value="${d[g] ? d[g][c] : ''}"></div></td>`).join('')}</tr>`).join(''))}</tbody></table></div>
         <button class="btn primary top-gap" type="submit">Save discounts</button></form></section>
+    <section class="panel"><h2>Customer messages</h2><p class="muted">The WhatsApp messages the team sends from Customers and Follow-up lists. In a message, these are filled in for each customer: {name} their first name, {link} their own feedback link, {review_link}, {website}, {coupon}, {product} and {price} (the book chosen, at the WhatsApp price), {academy_text}, {academy_link}.</p>
+      <form id="f-msg" novalidate>
+        <div class="grid2">${raw((state.messageFields || []).map(([k, l]) => `<div class="field${k === 'academy_text' ? ' span2' : ''}"><label for="m-${k}">${esc(l)}</label>${k === 'academy_text' ? `<textarea id="m-${k}" name="${k}" rows="2" maxlength="600">${esc(state.messages[k] || '')}</textarea>` : `<input id="m-${k}" name="${k}" maxlength="600" value="${esc(state.messages[k] || '')}" ${k.endsWith('_url') ? 'type="url" placeholder="https://…"' : ''}>`}
+          ${k === 'coupon' ? '<div class="hint">Sent once a customer shows their website review. For example: THANKYOU10 (10% off your next order on the website).</div>' : k === 'review_url' ? '<div class="hint">Where customers write a review. Empty: the website address is used.</div>' : ''}</div>`).join(''))}</div>
+        ${raw((state.messageKinds || []).map(([k, l, h]) => `<div class="field"><label for="mt-${k}">${esc(l)}</label><textarea id="mt-${k}" name="t:${k}" rows="3" maxlength="1000">${esc(state.messages.templates[k] || '')}</textarea><div class="hint">${esc(h)}</div></div>`).join(''))}
+        <button class="btn primary" type="submit">Save customer messages</button></form></section>
     <section class="panel"><h2>Order charges and bulk orders</h2><p class="muted">The charges are added to a tele-sales order when ticked on the sale form. The bulk rule drives the "Bulk order customers" filter on the Customers page.</p>
       <form id="f-charges" novalidate><div class="grid2">${raw(AMOUNTS.map(([k, l, h]) => `<div class="field"><label for="a-${k}">${esc(l)}</label><input id="a-${k}" name="${k}" type="number" inputmode="numeric" min="0" step="1" value="${ch[k] ?? 0}"><div class="hint">${esc(h)}</div></div>`).join(''))}</div>
         <button class="btn primary" type="submit">Save charges and bulk rule</button></form></section>
@@ -60,6 +66,11 @@ async function renderGeneral(page) {
   onSubmit(page.querySelector('#f-disc'), async v => {
     const body = {}; for (const [k, val] of Object.entries(v)) { const [g, c] = k.split(':'); (body[g] = body[g] || {})[c] = val; }
     state.discounts = await api('PUT', '/api/settings/discounts', body); window.dispatchEvent(new Event('nm:changed')); toast('Discounts saved'); renderGeneral(page);
+  });
+  onSubmit(page.querySelector('#f-msg'), async v => {
+    const body = { templates: {} };
+    for (const [k, val] of Object.entries(v)) { if (k.startsWith('t:')) body.templates[k.slice(2)] = val; else body[k] = val; }
+    state.messages = await api('PUT', '/api/settings/messages', body); toast('Customer messages saved'); renderGeneral(page);
   });
   onSubmit(page.querySelector('#f-charges'), async v => { state.charges = await api('PUT', '/api/settings/charges', v); toast('Saved'); renderGeneral(page); });
   page.querySelectorAll('form[data-list]').forEach(form => onSubmit(form, async v => {

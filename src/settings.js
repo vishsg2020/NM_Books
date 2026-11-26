@@ -95,4 +95,63 @@ function cleanCostRules(body) {
   return out;
 }
 
-module.exports = { getCharges, cleanCharges, DEFAULT_CHARGES, getLists, cleanList, getCostRules, cleanCostRules, write, read, DEFAULT_LISTS, LOCKED, LIST_NAMES, COST_PARTS, COST_MODES, DEFAULT_COST_RULES };
+// ---------- Customer messages (Settings → General → Customer messages) ----------
+// The WhatsApp messages the team sends from Customers and Follow-up lists. In a template:
+// {name} the customer's first name, {link} their feedback link, {review_link}, {website}, {coupon},
+// {product} and {price} the book chosen, {academy_text}, {academy_link}.
+const MESSAGE_KINDS = [
+  ['feedback', 'Feedback request', 'A link with star rating and two quick questions'],
+  ['review', 'Website review request', 'Ask for a review on the website; a coupon after they send a screenshot'],
+  ['coupon', 'Coupon (after a review)', 'Send the coupon once they have shown their review'],
+  ['new_product', 'New product', 'Tell them about a book or set'],
+  ['academy', 'Language Academy', 'About Nalla Malayalam Language Academy'],
+  ['share', 'Share with friends', 'Ask them to pass it on to family and friends'],
+  ['custom', 'Own message', 'Type your own'],
+];
+const MESSAGE_FIELDS = [
+  ['website_url', 'Website address', 'https://www.nallamalayalam.in'],
+  ['review_url', 'Website review page', ''],
+  ['coupon', 'Coupon to send after a review', ''],
+  ['academy_text', 'About the Language Academy', 'Nalla Malayalam Language Academy teaches children to read and write Malayalam in small online classes, wherever they live. Ask us for the next batch.'],
+  ['academy_url', 'Language Academy link', ''],
+];
+const DEFAULT_MESSAGES = {
+  website_url: 'https://www.nallamalayalam.in', review_url: '', coupon: '', academy_url: '',
+  academy_text: MESSAGE_FIELDS[3][2],
+  templates: {
+    feedback: 'Hello {name}, thank you for buying from Nalla Malayalam! We would love to know what you think of the books. It takes 30 seconds:\n{link}\nThank you!',
+    review: 'Hello {name}, thank you for choosing Nalla Malayalam! Could you write a short review on our website? It helps other parents find us:\n{review_link}\nSend us a screenshot of your review here and we will send you a coupon for your next order.',
+    coupon: 'Hello {name}, thank you so much for your review! Here is your coupon for your next order: {coupon}\nOrder on our website: {website}',
+    new_product: 'Hello {name}, greetings from Nalla Malayalam. {product} is now available at ₹{price}. Reply to this message to order, or order on our website: {website}',
+    academy: 'Hello {name}, greetings from Nalla Malayalam. {academy_text}\n{academy_link}',
+    share: 'Hello {name}, thank you for being a Nalla Malayalam reader! If your friends and family would like their children to learn Malayalam, please share our website with them: {website}',
+    custom: 'Hello {name}, greetings from Nalla Malayalam.',
+  },
+};
+async function getMessages(db) {
+  const saved = (await read(db, 'messages')) || {};
+  const out = { templates: {} };
+  for (const [k] of MESSAGE_FIELDS) out[k] = typeof saved[k] === 'string' ? saved[k] : DEFAULT_MESSAGES[k];
+  for (const [k] of MESSAGE_KINDS) out.templates[k] = saved.templates && typeof saved.templates[k] === 'string' && saved.templates[k].trim() ? saved.templates[k] : DEFAULT_MESSAGES.templates[k];
+  return out;
+}
+function cleanMessages(body) {
+  if (!body || typeof body !== 'object') throw bad('Send the customer messages');
+  const out = { templates: {} };
+  for (const [k, label] of MESSAGE_FIELDS) {
+    const v = String(body[k] ?? '').trim();
+    if (v.length > 600) throw bad(`${label} is too long`, { field: label });
+    if (k.endsWith('_url') && v && !/^https:\/\/[^\s]+$/.test(v)) throw bad(`${label} must start with https://`, { field: label });
+    out[k] = v;
+  }
+  for (const [k, label] of MESSAGE_KINDS) {
+    const v = String((body.templates || {})[k] ?? '').trim();
+    if (!v) throw bad(`Write the "${label}" message`, { field: label });
+    if (v.length > 1000) throw bad(`The "${label}" message is too long`, { field: label });
+    if (k === 'feedback' && !v.includes('{link}')) throw bad('The feedback message needs {link}, where each customer\'s own link goes', { field: label });
+    out.templates[k] = v;
+  }
+  return out;
+}
+
+module.exports = { MESSAGE_KINDS, MESSAGE_FIELDS, DEFAULT_MESSAGES, getMessages, cleanMessages, getCharges, cleanCharges, DEFAULT_CHARGES, getLists, cleanList, getCostRules, cleanCostRules, write, read, DEFAULT_LISTS, LOCKED, LIST_NAMES, COST_PARTS, COST_MODES, DEFAULT_COST_RULES };

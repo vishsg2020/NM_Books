@@ -1,7 +1,7 @@
 'use strict';
 const { audit } = require('../audit');
 const { getLists, getCharges, read, write } = require('../settings');
-const { bad, notFound, conflict, str, oneOf, idParam, normPhone } = require('../util');
+const { bad, notFound, conflict, str, oneOf, idParam, normPhone, today } = require('../util');
 
 const TYPES = ['Individual', 'School', 'Bookstore', 'Other'];
 
@@ -49,6 +49,13 @@ function needsSql(places) {
     CASE WHEN NOT EXISTS (SELECT 1 FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled') THEN 'No order' END
   ]::text[], NULL) END`;
 }
+// Sort orders for the customer list. "recent" is the default.
+const SORTS = {
+  recent: 'last_purchase_date DESC NULLS LAST, name', oldest: 'last_purchase_date ASC NULLS LAST, name',
+  orders: 'total_orders DESC, last_purchase_date DESC NULLS LAST, name', spent: 'total_purchase_amount DESC, name',
+  name: 'lower(name), id', newest: 'id DESC',
+};
+const NOT_SINCE = { 3: '3 months', 6: '6 months', 12: '12 months' };
 const REASONS = ['Name to check', 'Name in Malayalam', 'PIN missing', 'PIN wrong', 'Address missing', 'No order'];
 
 /**
@@ -76,7 +83,10 @@ async function mergeCustomers(t, keepId, otherId, user, reason) {
     source: a.created_at <= b.created_at ? a.source : b.source, created_at: a.created_at <= b.created_at ? a.created_at : b.created_at,
   };
   const moved = {};
-  for (const table of ['sales', 'calls', 'visits']) moved[table] = (await t.run(`UPDATE ${table} SET customer_id = ? WHERE customer_id = ?`, [a.id, b.id])).rowCount;
+  for (const table of ['sales', 'calls', 'visits', 'customer_messages', 'feedback']) moved[table] = (await t.run(`UPDATE ${table} SET customer_id = ? WHERE customer_id = ?`, [a.id, b.id])).rowCount;
+  // Follow-up lists: a list holding both keeps the kept record's row; the other's rows move across.
+  await t.run('DELETE FROM follow_up_members m WHERE m.customer_id = ? AND EXISTS (SELECT 1 FROM follow_up_members k WHERE k.list_id = m.list_id AND k.customer_id = ?)', [b.id, a.id]);
+  await t.run('UPDATE follow_up_members SET customer_id = ? WHERE customer_id = ?', [a.id, b.id]);
   await t.run('DELETE FROM customers WHERE id = ?', [b.id]);
   await t.run(`UPDATE customers SET name = ?, phone = ?, phone_norm = ?, phone2 = ?, phone2_norm = ?, address = ?, location = ?, state = ?, pin = ?, contact_person = ?, notes = ?,
       kind = ?, source = ?, created_at = ?, updated_at = now_iso() WHERE id = ?`,
@@ -154,8 +164,15 @@ module.exports = (app, { db, perm, requireAdmin }) => {
     if (q.view === 'update') outer.push('cardinality(needs) > 0');
     else if (!q.q) outer.push('cardinality(needs) = 0');
     if (q.reason) { outer.push('@reason = ANY(needs)'); p.reason = oneOf(q.reason, REASONS, { name: 'Reason' }); }
+    // Not bought since: has ordered before, but nothing in the last 3, 6 or 12 months.
+    if (q.not_since) {
+      const months = Number(oneOf(String(q.not_since), Object.keys(NOT_SINCE), { name: 'Not bought since' }));
+      const d = new Date(today() + 'T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() - months);
+      outer.push('last_purchase_date < @since'); p.since = d.toISOString().slice(0, 10);
+    }
+    const sort = SORTS[q.sort ? oneOf(q.sort, Object.keys(SORTS), { name: 'Sort by' }) : 'recent'];
     const sql = `SELECT * FROM (SELECT c.*, ${STATS}, ${needsSql(lists.places)} AS needs FROM customers c ${where.length ? 'WHERE ' + where.join(' AND ') : ''}) x
-      ${outer.length ? 'WHERE ' + outer.join(' AND ') : ''} ORDER BY last_purchase_date DESC NULLS LAST, name`;
+      ${outer.length ? 'WHERE ' + outer.join(' AND ') : ''} ORDER BY ${sort}`;
     return { sql, p };
   }
 
@@ -208,7 +225,7 @@ module.exports = (app, { db, perm, requireAdmin }) => {
         CASE WHEN s.import_ref LIKE 'WEB-%' THEN 'Website' WHEN s.import_ref LIKE 'WA-%' THEN 'WhatsApp group' WHEN s.import_ref IS NOT NULL THEN 'Order sheet' ELSE 'Sales' END AS source
       FROM sales s WHERE s.customer_id IS NULL AND s.status <> 'Cancelled' AND s.channel <> 'Onsite' ORDER BY s.sale_date DESC, s.id DESC LIMIT 500`);
     const { m } = await db.get(`SELECT COUNT(*) AS m FROM sales s WHERE s.customer_id IS NULL AND s.status <> 'Cancelled' AND s.channel <> 'Onsite'`);
-    res.json({ needing: n, complete: total.n - n, reasons: Object.fromEntries(REASONS.map(r => [r, (counts.find(c => c.reason === r) || {}).n || 0])), sales_without_customer: m, sales: noCustomer });
+    res.json({ feedback: (await db.get('SELECT COUNT(*) AS n FROM feedback WHERE submitted_at IS NOT NULL')).n, needing: n, complete: total.n - n, reasons: Object.fromEntries(REASONS.map(r => [r, (counts.find(c => c.reason === r) || {}).n || 0])), sales_without_customer: m, sales: noCustomer });
   });
 
   // Possibly the same person twice: same name (letters only) and the same PIN. Pairs marked "not the same person" are left out.
@@ -256,7 +273,14 @@ module.exports = (app, { db, perm, requireAdmin }) => {
     for (const s of sales) s.items = items.filter(i => i.sale_id === s.id);
     const calls = await db.all(`SELECT ${require('./calls').CALL_LIST} ${require('./calls').CALL_FROM} WHERE c.customer_id = ? ORDER BY c.called_at DESC, c.id DESC LIMIT 200`, [c.id]);
     const visits = await db.all(`SELECT ${require('./visits').VISIT_LIST} ${require('./visits').VISIT_FROM} WHERE v.customer_id = ? ORDER BY v.visit_date DESC, v.id DESC LIMIT 200`, [c.id]);
-    res.json({ ...c, sales, payments, books, calls, visits });
+    const messages = await db.all(`SELECT m.id, m.kind, m.created_at, u.name AS user_name, l.name AS list_name, b.name AS book_name FROM customer_messages m
+      JOIN users u ON u.id = m.user_id LEFT JOIN follow_up_lists l ON l.id = m.list_id LEFT JOIN books b ON b.id = m.book_id
+      WHERE m.customer_id = ? ORDER BY m.id DESC LIMIT 100`, [c.id]);
+    const feedback = (await db.all(`SELECT id, stars, liked_json, reasons_json, comment, submitted_at, requested_at FROM feedback
+      WHERE customer_id = ? AND submitted_at IS NOT NULL ORDER BY submitted_at DESC`, [c.id])).map(require('./followups').feedbackRow);
+    const lists = await db.all(`SELECT l.id, l.name, l.closed_at, m.status FROM follow_up_members m JOIN follow_up_lists l ON l.id = m.list_id
+      WHERE m.customer_id = ? ORDER BY l.id DESC`, [c.id]);
+    res.json({ ...c, sales, payments, books, calls, visits, messages, feedback, lists });
   });
 
   app.patch('/api/customers/:id', perm('customers'), async (req, res) => {
@@ -296,8 +320,12 @@ module.exports = (app, { db, perm, requireAdmin }) => {
     });
     res.json(await db.get(`SELECT c.*, ${STATS} FROM customers c WHERE c.id = ?`, [before.id]));
   });
+
+  require('./followups')(app, { db, perm, customerQuery, getCharges, getLists });
 };
 module.exports.findOrCreateCustomer = findOrCreateCustomer;
+module.exports.SORTS = SORTS;
+module.exports.NOT_SINCE = NOT_SINCE;
 module.exports.mergeCustomers = mergeCustomers;
 module.exports.needsSql = needsSql;
 module.exports.SOURCES = SOURCES;

@@ -1,4 +1,5 @@
-import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, fmtDate, parseHash, wireFilters, qs, state, waLink, STATES, wide, canEdit, isAdmin } from '../core.js';
+import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, fmtDate, fmtStamp, parseHash, wireFilters, qs, state, waLink, STATES, wide, canEdit, isAdmin } from '../core.js';
+import { whatsappDrawer } from './messages.js';
 import { openSale } from './sales.js';
 import { callsTable, callForm, wireCallActions } from './calls.js';
 import { visitsTable, wireVisitActions } from './visits.js';
@@ -16,19 +17,23 @@ const REASON_HELP = {
   'PIN missing': 'No PIN code. Needed for delivery.', 'PIN wrong': 'The PIN is not 6 digits.',
   'Address missing': 'No address, or too short to deliver to.', 'No order': 'Added from the WhatsApp group, but the post named no book, so no order was recorded.',
 };
+const SORT = [['recent', 'Last purchase, newest first'], ['oldest', 'Last purchase, oldest first'], ['orders', 'Most orders'], ['spent', 'Most spent'], ['name', 'Name A–Z'], ['newest', 'Newest customers']];
+const NOT_SINCE = [['3', '3 months'], ['6', '6 months'], ['12', '12 months']];
 const ORDER_FILTER = [['repeat', 'Repeat customers (2 or more orders)'], ['twice', 'Ordered twice'], ['3plus', 'Ordered 3 or more times'], ['once', 'Ordered once']];
 const sourceLabel = c => (c.source ? ` · ${esc(c.source)}` : '');
 const reasonPills = c => (c.needs || []).map(r => `<span class="pill amber">${esc(r)}</span>`).join(' ');
 
 export async function renderList(page, { query }) {
+  if (query.view === 'feedback') return renderFeedback(page);
   const update = query.view === 'update';
   const [locations, sum] = await Promise.all([get('/api/customers/locations'), get('/api/customers/update-summary')]);
   const products = state.books.filter(b => b.active && b.sku !== 'OTHER').map(b => [b.id, b.name]);
   const n = v => Number(v || 0).toLocaleString('en-IN');
   const tabs = `<nav class="tabs" aria-label="Customer lists"><a href="#/customers" ${update ? '' : 'aria-current="page"'}>Customers <span class="count">${n(sum.complete)}</span></a>
-    <a href="#/customers?view=update" ${update ? 'aria-current="page"' : ''}>Update needed <span class="count">${n(sum.needing + sum.sales_without_customer)}</span></a></nav>`;
+    <a href="#/customers?view=update" ${update ? 'aria-current="page"' : ''}>Update needed <span class="count">${n(sum.needing + sum.sales_without_customer)}</span></a>
+    <a href="#/customers?view=feedback">Feedback <span class="count">${n(sum.feedback)}</span></a></nav>`;
   page.innerHTML = html`<div class="page-head"><div><h1>Customers</h1><div class="sub">${update ? 'Records that are missing a detail or need a check before they join the customer list.' : 'Complete customer records. A customer is recognised by their contact number.'}</div></div>
-      <div class="actions">${raw(!update && wide() ? '<button class="btn" type="button" id="gc-dl">Download for Google Contacts</button>' : '')}${raw(update ? '' : '<button class="btn" type="button" id="wa-all">WhatsApp the customers shown</button>')}</div></div>
+      <div class="actions">${raw(!update && wide() ? '<button class="btn" type="button" id="gc-dl">Download for Google Contacts</button>' : '')}${raw(update ? '' : '<button class="btn" type="button" id="wa-all">WhatsApp the customers shown</button>')}${raw(!update && canEdit('customers') ? '<button class="btn primary" type="button" id="save-list">Save as a follow-up list</button>' : '')}</div></div>
     ${raw(tabs)}
     ${raw(update ? `<div class="chips">${REASONS.map(r => `<a class="chip${query.reason === r ? ' on' : ''}" href="#/customers?view=update${query.reason === r ? '' : '&reason=' + encodeURIComponent(r)}" title="${esc(REASON_HELP[r])}">${esc(r)} <b>${n(sum.reasons[r])}</b></a>`).join('')}
       <a class="chip" href="#dup-sec">Possible duplicates <b id="dup-count">…</b></a><a class="chip" href="#nocust-sec">Sales with no customer <b>${n(sum.sales_without_customer)}</b></a></div>` : '')}
@@ -46,7 +51,9 @@ export async function renderList(page, { query }) {
       <div class="field"><label for="cf-bo">Bought</label><select id="cf-bo" name="bought">${options(products, query.bought, 'Any book or set')}</select></div>
       <div class="field"><label for="cf-nb">But has not bought</label><select id="cf-nb" name="not_bought">${options(products, query.not_bought, 'No condition')}</select></div>
       <div class="field"><label for="cf-k">Show</label><select id="cf-k" name="kind">${options([['Lead', 'Leads (called, not bought yet)'], ['all', 'Customers and leads']], query.kind, 'Customers')}</select></div>
-      <div class="field"><label for="cf-o">Payments</label><select id="cf-o" name="outstanding">${options([['1', 'Has an outstanding amount']], query.outstanding, 'All')}</select></div>`)}
+      <div class="field"><label for="cf-o">Payments</label><select id="cf-o" name="outstanding">${options([['1', 'Has an outstanding amount']], query.outstanding, 'All')}</select></div>
+      <div class="field"><label for="cf-ns">Not bought since</label><select id="cf-ns" name="not_since">${options(NOT_SINCE, query.not_since, 'No condition')}</select></div>
+      <div class="field"><label for="cf-so">Sort by</label><select id="cf-so" name="sort">${options(SORT, query.sort, 'Last purchase, newest first')}</select></div>`)}
       <button class="btn" type="button" data-clear>Clear filters</button>
     </form><p class="result-count" id="c-count"></p><div id="c-list"></div>
     ${raw(update ? `<section class="panel top-gap" id="dup-sec"><h2>Possible duplicates</h2><p class="muted">The same name and the same PIN on two records: usually one person who gave two numbers. Merging keeps the record with more orders, moves every order, call and visit to it, and keeps the other number as a second number.</p><div id="dup-list"><p class="muted">Loading…</p></div></section>
@@ -72,7 +79,8 @@ export async function renderList(page, { query }) {
         <p class="muted">Importing the same file twice makes duplicates; Google Contacts has a "Merge &amp; fix" option to tidy them.</p>`, foot: '<button class="btn primary" type="button" data-close>Done</button>' });
     } catch (err) { toast(err.message, 'error'); } finally { btn.disabled = false; }
   });
-  page.querySelector('#wa-all')?.addEventListener('click', () => whatsappDrawer(shown.filter(c => waLink(c.phone))));
+  page.querySelector('#wa-all')?.addEventListener('click', () => whatsappDrawer(shown));
+  page.querySelector('#save-list')?.addEventListener('click', () => saveListForm(page));
   const list = page.querySelector('#c-list');
   list.addEventListener('click', async e => {
     const w = e.target.closest('[data-wa]'); if (w) whatsappDrawer(shown.filter(c => String(c.id) === w.dataset.wa));
@@ -165,14 +173,23 @@ export async function renderProfile(page, { id }) {
       </div>
     </div>
     ${c.visits.length || isPlace ? `<section class="panel top-gap" id="p-visits"><h2>Visits</h2>${visitsTable(c.visits, { place: false, empty: 'No visits recorded for this place' })}</section>` : ''}
-    <section class="panel top-gap" id="p-calls"><h2>Calls and follow-ups</h2>${callsTable(c.calls, { who: false, empty: 'No calls recorded for this person' })}</section>`;
+    <section class="panel top-gap" id="p-calls"><h2>Calls and follow-ups</h2>${callsTable(c.calls, { who: false, empty: 'No calls recorded for this person' })}</section>
+    <div class="cols top-gap">
+      <div><section class="panel"><h2>Feedback</h2>${c.feedback.length ? c.feedback.map(feedbackCard).join('') : '<p class="muted">No feedback yet. Send a feedback request with the WhatsApp button.</p>'}</section></div>
+      <div><section class="panel"><h2>WhatsApp messages</h2>${table([
+        { label: 'When', cell: x => esc(fmtStamp(x.created_at)) },
+        { label: 'Message', cell: x => `${esc(KIND_NAME()[x.kind] || x.kind)}${x.book_name ? `<span class="sub">${esc(x.book_name)}</span>` : ''}${x.list_name ? `<span class="sub">List: ${esc(x.list_name)}</span>` : ''}` },
+        { label: 'By', cell: x => esc(x.user_name) },
+      ], c.messages, { empty: 'No messages yet' })}
+      ${c.lists.length ? `<h3 class="top-gap">Follow-up lists</h3><ul class="plain">${c.lists.map(l => `<li><a href="#/followups/${l.id}">${esc(l.name)}</a> · ${esc(l.status)}${l.closed_at ? ' <span class="muted">(closed)</span>' : ''}</li>`).join('')}</ul>` : ''}</section></div>
+    </div>`;
   const reload = () => renderProfile(page, { id });
   wireCallActions(page.querySelector('#p-calls'), () => c.calls, reload);
   if (page.querySelector('#p-visits')) wireVisitActions(page.querySelector('#p-visits'), () => c.visits, reload);
   page.querySelector('#visit-one')?.addEventListener('click', () => saleForm({ startChannel: 'Onsite', customer: { location_id: c.id }, after: reload }));
   page.querySelector('#call-one')?.addEventListener('click', () => callForm({ phone: c.phone, name: c.name, after: reload }));
   page.querySelector('#c-sales').addEventListener('click', e => { const b = e.target.closest('[data-open]'); if (b) openSale(b.dataset.open, reload); });
-  page.querySelector('#wa-one')?.addEventListener('click', () => whatsappDrawer([c]));
+  page.querySelector('#wa-one')?.addEventListener('click', () => whatsappDrawer([c], { after: reload }));
   page.querySelector('#name-ok')?.addEventListener('click', async () => { await api('PATCH', `/api/customers/${c.id}`, { name_ok: true }); toast('Name confirmed'); reload(); });
   page.querySelector('#edit-c')?.addEventListener('click', () => drawer({
     title: `Edit ${c.name}`,
@@ -194,34 +211,55 @@ export async function renderProfile(page, { id }) {
   }));
 }
 
-/**
- * WhatsApp, one customer at a time: write the message once, then open each chat with it typed in.
- * The app sends nothing itself; the person presses Send in WhatsApp.
- */
-function whatsappDrawer(customers) {
-  if (!customers.length) { toast('No customer here has a number WhatsApp can use', 'error'); return; }
-  const books = state.books.filter(b => b.active);
-  const text = b => (b ? `Hello {name}, greetings from Nalla Malayalam. Our book "${b.name}" is now available at ₹${b.price}. Reply to this message to order.` : 'Hello {name}, greetings from Nalla Malayalam.');
+
+const KIND_NAME = () => Object.fromEntries((state.messageKinds || []).map(([k, l]) => [k, l]));
+const starText = n => '★'.repeat(n) + '☆'.repeat(5 - n);
+export const feedbackCard = f => `<div class="fb-card"><div><span class="stars-s" aria-label="${f.stars} out of 5 stars">${starText(f.stars)}</span> <span class="muted small">${esc(fmtStamp(f.submitted_at))}</span></div>
+  ${f.liked.length ? `<div class="small">Likes: ${esc(f.liked.join(', '))}</div>` : ''}${f.reasons.length ? `<div class="small">Bought: ${esc(f.reasons.join(', '))}</div>` : ''}
+  ${f.comment ? `<blockquote>${esc(f.comment)}</blockquote>` : ''}</div>`;
+
+/** Saves the customers the filters show now as a follow-up list for the team. */
+function saveListForm(page) {
+  const q = parseHash().query; const count = page.querySelector('#c-count').textContent;
+  const labels = [...page.querySelectorAll('#c-filters select, #c-filters input[type=search]')].filter(el => el.value && el.name !== 'sort')
+    .map(el => (el.tagName === 'SELECT' ? `${el.labels[0]?.textContent}: ${el.selectedOptions[0]?.textContent}` : `Search: ${el.value}`));
   drawer({
-    wide: customers.length > 1,
-    title: customers.length === 1 ? `WhatsApp ${customers[0].name}` : `WhatsApp ${customers.length} customers, one by one`,
-    body: html`<div class="field"><label for="wa-book">Book to tell them about</label><select id="wa-book">${raw(options(books.map(b => [b.id, `${b.name} · ₹${b.price}`]), '', 'No book, just a greeting'))}</select></div>
-      <div class="field"><label for="wa-text">Message</label><textarea id="wa-text" rows="5" maxlength="1000">${text(null)}</textarea>
-        <div class="hint">{name} becomes each customer's name. Each button opens WhatsApp with this message typed in; you press Send there.</div></div>
-      <div id="wa-list"></div>`,
-    foot: '<button class="btn" type="button" data-close>Close</button>',
-    onMount: d => {
-      const ta = d.querySelector('#wa-text'); const list = d.querySelector('#wa-list'); const opened = new Set();
-      const draw = () => {
-        list.innerHTML = table([
-          { label: 'Customer', cell: c => `${esc(c.name)}<span class="sub">${esc(c.phone)}</span>` },
-          { label: 'Open', cls: 'cell-actions', cell: c => `${opened.has(c.id) ? '<span class="pill green">Opened</span> ' : ''}<a class="btn small ${opened.has(c.id) ? '' : 'primary'}" target="_blank" rel="noopener noreferrer" data-id="${c.id}" href="${esc(waLink(c.phone, ta.value.replaceAll('{name}', c.name.trim())))}">Open WhatsApp</a>` },
-        ], customers);
-      };
-      d.querySelector('#wa-book').addEventListener('change', e => { ta.value = text(books.find(b => String(b.id) === e.target.value)); draw(); });
-      ta.addEventListener('input', draw);
-      list.addEventListener('click', e => { const a = e.target.closest('a[data-id]'); if (a) { opened.add(Number(a.dataset.id)); setTimeout(draw, 50); } });
-      draw();
-    },
+    title: 'Save as a follow-up list',
+    body: html`<p>The customers these filters find (<strong>${count.split('.')[0]}</strong>) go into a list the team works through. The list keeps these people even if their details change later.</p>
+      <form id="fl-form" novalidate>
+        <div class="field"><label for="fl-name">List name *</label><input id="fl-name" name="name" required maxlength="120" placeholder="e.g. NM 1+2 buyers, no Kuttivayana yet — Nov 2026"></div>
+        <div class="field"><label for="fl-note">Note for the team</label><textarea id="fl-note" name="note" rows="3" maxlength="500" placeholder="What to offer or ask"></textarea></div>
+      </form>
+      <p class="muted small">${labels.length ? 'Filters saved with it: ' + labels.join(' · ') : 'No filters: every customer in the list.'}</p>`,
+    foot: '<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="fl-form">Save list</button>',
+    onMount: (d, close) => onSubmit(d.querySelector('#fl-form'), async v => {
+      const r = await api('POST', '/api/followups', { name: v.name, note: v.note, filters: q });
+      close(); toast(`List saved with ${r.total.toLocaleString('en-IN')} customers`); location.hash = `#/followups/${r.id}`;
+    }),
   });
+}
+
+/** Customers → Feedback: the answers to the feedback links. */
+async function renderFeedback(page) {
+  const [f, sum] = await Promise.all([get('/api/feedback'), get('/api/customers/update-summary')]);
+  const n = v => Number(v || 0).toLocaleString('en-IN');
+  const bars = rows => { const max = Math.max(1, ...rows.map(r => r[1])); return `<div class="hbars">${rows.map(([l, v]) => `<div class="hbar"><span class="l">${esc(String(l))}</span><span class="b"><i data-w="${Math.round((v / max) * 100)}"></i></span><span class="v">${n(v)}</span></div>`).join('')}</div>`; };
+  page.innerHTML = `<div class="page-head"><div><h1>Customers</h1><div class="sub">What customers said through their feedback links.</div></div></div>
+    <nav class="tabs" aria-label="Customer lists"><a href="#/customers">Customers <span class="count">${n(sum.complete)}</span></a>
+      <a href="#/customers?view=update">Update needed <span class="count">${n(sum.needing + sum.sales_without_customer)}</span></a>
+      <a href="#/customers?view=feedback" aria-current="page">Feedback <span class="count">${n(f.answered)}</span></a></nav>
+    <div class="kpis"><div class="kpi"><span class="l">Answers</span><span class="v">${n(f.answered)}</span><span class="s">of ${n(f.sent)} links sent</span></div>
+      <div class="kpi"><span class="l">Average rating</span><span class="v">${f.average === null ? '—' : esc(f.average.toFixed(1)) + ' ★'}</span></div></div>
+    <div class="grid-3 top-gap"><section class="panel"><h2>Stars</h2>${bars(f.stars.map(([s, v]) => [s + ' ★', v]))}</section>
+      <section class="panel"><h2>What they like most</h2>${bars(f.liked)}</section>
+      <section class="panel"><h2>Why they bought</h2>${bars(f.reasons)}</section></div>
+    <section class="panel top-gap"><h2>Answers</h2>${table([
+      { label: 'Customer', cell: r => `<a href="#/customer/${r.customer_id}">${esc(r.customer_name)}</a><span class="sub">${esc(r.customer_code)} · ${esc(fmtStamp(r.submitted_at))}</span>` },
+      { label: 'Rating', cell: r => `<span class="stars-s" aria-label="${r.stars} out of 5">${starText(r.stars)}</span>` },
+      { label: 'Likes', cell: r => esc(r.liked.join(', ') || '—') },
+      { label: 'Bought', cell: r => esc(r.reasons.join(', ') || '—') },
+      { label: 'Comment', cell: r => esc(r.comment || '—') },
+    ], f.rows, { empty: 'No feedback yet', emptyHint: 'Send a feedback request from a customer\'s WhatsApp button, or from a follow-up list.' })}</section>`;
+  // Bar widths are set here, not inline in the markup (the page's security policy blocks inline styles).
+  page.querySelectorAll('i[data-w]').forEach(i => { i.style.width = i.dataset.w + '%'; });
 }

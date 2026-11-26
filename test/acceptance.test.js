@@ -982,3 +982,84 @@ test('roles & access: nobody changes their own role; a role change signs the per
   await A.login('a@x.in');
   ok(await A.patch(`/api/users/${a2}`, { active: false }), 200);
 });
+
+test('customers: sort, and "not bought since"', async () => {
+  const byName = (await A.get('/api/customers?sort=name')).data.rows.map(c => c.name.toLowerCase());
+  assert.deepEqual(byName, [...byName].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)));
+  const spent = (await A.get('/api/customers?sort=spent')).data.rows.map(c => c.total_purchase_amount);
+  assert.deepEqual(spent, [...spent].sort((a, b) => b - a));
+  assert.equal((await A.get('/api/customers?sort=shoe-size')).status, 400);
+  const old = (await A.get('/api/customers?not_since=6')).data.rows;
+  assert.ok(old.every(c => c.last_purchase_date && c.last_purchase_date < '2026-05-16'));
+  assert.equal((await A.get('/api/customers?not_since=5')).status, 400);
+});
+
+test('follow-up lists: saved from the filters; statuses from messages, calls, feedback and orders; the public feedback page', async () => {
+  for (const [phone, name] of [['9700000001', 'Follow One'], ['9700000002', 'Follow Two']]) ok(await T.post('/api/calls', { phone, customer_name: name, status: 'Busy' }));
+  const filters = { q: '97000000', kind: 'all' };
+  assert.equal((await D.post('/api/followups', { name: 'X', filters })).status, 403);
+  assert.equal((await T.post('/api/followups', { name: 'Nobody', filters: { q: 'no-such-person-zz' } })).status, 400);
+  const made = ok(await T.post('/api/followups', { name: 'Leads to call again', note: 'Offer the NM set', filters }));
+  assert.equal(made.total, 2);
+  // pretend the list was made a day ago, so an order today counts as "ordered again"
+  await db.run(`UPDATE follow_up_lists SET created_at = '2026-11-15T00:00:00.000Z' WHERE id = ?`, [made.id]);
+  let l = ok(await T.get(`/api/followups/${made.id}`), 200);
+  assert.equal(l.members.length, 2); assert.ok(l.members.every(m => m.status === 'Not contacted yet'));
+  const [one, two] = ['Follow One', 'Follow Two'].map(nm => l.members.find(m => m.name === nm));
+  assert.equal(one.last_contact.how, 'Call: Busy');
+  // a WhatsApp feedback request, then the customer answers on the public page
+  assert.equal((await T.post(`/api/customers/${one.id}/messages`, { kind: 'poem' })).status, 400);
+  ok(await T.post(`/api/customers/${one.id}/messages`, { kind: 'feedback', list_id: made.id }));
+  const links = ok(await T.post('/api/feedback/links', { customer_ids: [one.id] }), 200).links;
+  const token = links[one.id]; assert.match(token, /^[A-Za-z0-9_-]{24}$/);
+  assert.equal(ok(await T.post('/api/feedback/links', { customer_ids: [one.id] }), 200).links[one.id], token); // reused until answered
+  l = (await T.get(`/api/followups/${made.id}`)).data;
+  assert.equal(l.members.find(m => m.id === one.id).status, 'Feedback requested');
+  assert.match(l.members.find(m => m.id === one.id).last_contact.how, /Feedback request/);
+  const pub = ok(await anon.get(`/api/public/feedback/${token}`), 200);
+  assert.equal(pub.first_name, 'Follow'); assert.equal(pub.submitted, false);
+  assert.ok(!JSON.stringify(pub).includes('9700000001'));
+  assert.equal((await anon.get('/api/public/feedback/not-a-real-token-at-all')).status, 404);
+  assert.equal((await anon.post(`/api/public/feedback/${token}`, { liked: ['Pictures'] })).status, 400); // no stars
+  const r = await fetch(`${base}/api/public/feedback/${token}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"stars":5}' });
+  assert.equal(r.status, 403); // no cross-site posts
+  const ans = ok(await anon.post(`/api/public/feedback/${token}`, { stars: 5, liked: ['Pictures', '<script>'], reasons: ['As a gift'], comment: 'Lovely' }), 200);
+  assert.equal(ans.submitted, true); assert.deepEqual(ans.liked, ['Pictures']); assert.equal(ans.can_change, true);
+  l = (await T.get(`/api/followups/${made.id}`)).data;
+  assert.equal(l.members.find(m => m.id === one.id).status, 'Feedback received');
+  assert.equal(l.members.find(m => m.id === one.id).stars, 5);
+  const fb = (await M.get('/api/feedback')).data;
+  assert.ok(fb.answered >= 1 && fb.rows.some(x => x.customer_id === one.id && x.comment === 'Lovely'));
+  assert.equal((await T.get(`/api/customers/${one.id}`)).data.feedback[0].stars, 5);
+  // a missed call is "No answer"; an order after the list was made is "Ordered again", found by the app
+  ok(await T.post('/api/calls', { phone: '9700000002', status: 'Not Answered' }));
+  assert.equal((await T.get(`/api/followups/${made.id}`)).data.members.find(m => m.id === two.id).status, 'No answer');
+  const sale = ok(await T.post('/api/sales', { customer_name: 'Follow Two', customer_phone: '9700000002', address: 'House 12, Main Road', state: 'Kerala', location: 'Kannur', pin: '670001', items: [{ book_id: maam.id, qty: 1 }] }));
+  l = (await T.get(`/api/followups/${made.id}`)).data;
+  const t2 = l.members.find(m => m.id === two.id);
+  assert.equal(t2.status, 'Ordered again'); assert.equal(t2.sale_no, sale.sale_no); assert.equal(t2.status_by_name, null);
+  assert.equal(l.counts['Ordered again'], 1);
+  // the team sets a status by hand; a closed list cannot be changed
+  assert.equal((await T.patch(`/api/followups/${made.id}/members/${one.id}`, { status: 'Done-ish' })).status, 400);
+  ok(await T.patch(`/api/followups/${made.id}/members/${one.id}`, { status: 'Review requested' }), 200);
+  ok(await T.post(`/api/followups/${made.id}/close`), 200);
+  assert.equal((await T.patch(`/api/followups/${made.id}/members/${one.id}`, { status: 'Contacted' })).status, 409);
+  ok(await T.post(`/api/followups/${made.id}/reopen`), 200);
+  const all = (await M.get('/api/followups')).data.lists.find(x => x.id === made.id);
+  assert.equal(all.total, 2); assert.equal(all.counts['Ordered again'], 1);
+  assert.equal((await D.get('/api/followups')).status, 403);
+});
+
+test('customer messages: the Admin sets the wording; everyone signed in reads it', async () => {
+  const st = (await T.get('/api/settings/lists')).data;
+  assert.match(st.messages.templates.feedback, /\{link\}/); assert.equal(st.messages.website_url, 'https://www.nallamalayalam.in');
+  assert.ok(st.message_kinds.some(k => k[0] === 'academy'));
+  const body = { ...st.messages, review_url: 'https://www.nallamalayalam.in/reviews', coupon: 'THANKYOU10' };
+  assert.equal((await M.send('PUT', '/api/settings/messages', body)).status, 403);
+  assert.equal((await A.send('PUT', '/api/settings/messages', { ...body, templates: { ...body.templates, feedback: 'No link here' } })).status, 400);
+  assert.equal((await A.send('PUT', '/api/settings/messages', { ...body, review_url: 'http://insecure.example' })).status, 400);
+  const saved = ok(await A.send('PUT', '/api/settings/messages', body), 200);
+  assert.equal(saved.coupon, 'THANKYOU10');
+  const tok = (await db.get('SELECT token FROM feedback ORDER BY id LIMIT 1')).token;
+  assert.equal((await anon.get(`/api/public/feedback/${tok}`)).data.review_url, 'https://www.nallamalayalam.in/reviews');
+});

@@ -11,6 +11,7 @@ import * as webimport from './pages/webimport.js';
 import * as books from './pages/books.js';
 import * as inventory from './pages/inventory.js';
 import * as users from './pages/users.js';
+import * as followups from './pages/followups.js';
 
 const app = document.getElementById('app');
 // Each menu item shows when the role can view one of its areas (Settings → Roles & access). Settings is Admin only.
@@ -20,6 +21,7 @@ const NAV = [
     { path: 'sales', label: 'Sales', area: 'sales', not: 'dispatch' },
     { path: 'sales', label: 'Orders', area: 'sales', only: 'dispatch' },
     { path: 'customers', label: 'Customers', area: 'customers' },
+    { path: 'followups', label: 'Follow-up lists', area: 'customers' },
     { path: 'dispatch', label: 'Dispatch report', area: ['dispatch', 'reports'] },
     { path: 'webimport', label: 'Website orders', area: 'webimport' },
   ] },
@@ -43,7 +45,7 @@ const showItem = i => (i.admin ? isAdmin() : canView(i.area)) && (!i.only || sta
 
 // The area each page belongs to. `edits`: the page has something to change, so View alone gets the view-only note.
 const PAGE_AREA = {
-  dashboard: { area: 'dashboard' }, sales: { area: 'sales', edits: true }, customers: { area: 'customers', edits: true }, customer: { area: 'customers', edits: true },
+  dashboard: { area: 'dashboard' }, sales: { area: 'sales', edits: true }, customers: { area: 'customers', edits: true }, customer: { area: 'customers', edits: true }, followups: { area: 'customers', edits: true },
   dispatch: { area: ['dispatch', 'reports'], edits: 'dispatch' }, webimport: { area: 'webimport', edits: true }, calls: { area: 'calls', edits: true },
   callreport: { area: ['calls', 'reports'] }, visits: { area: 'visits', edits: true }, books: { area: 'books', edits: true },
   inventory: { area: 'stock', edits: true }, profit: { area: 'profit', edits: true }, settings: { admin: true }, users: { admin: true },
@@ -54,6 +56,7 @@ const ROUTES = {
   sales: sales.renderList,
   customers: customers.renderList,
   customer: customers.renderProfile,
+  followups: followups.render,
   calls: calls.renderList,
   visits: visits.renderList,
   profit: profit.render,
