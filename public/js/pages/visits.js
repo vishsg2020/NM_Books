@@ -52,7 +52,7 @@ function editVisitForm(v, after) {
 export async function renderList(page, { query }) {
   const people = state.people.filter(p => ['admin', 'manager', 'onsite'].includes(p.role));
   page.innerHTML = html`<div class="page-head"><div><h1>Visits</h1><div class="sub">Every visit to a school or bookstore, whether or not books were sold. An exhibition is recorded from Record a sale.</div></div>
-      ${canEdit('visits') ? '<div class="actions"><button class="btn primary" type="button" id="add-v">Record a visit</button></div>' : ''}</div>
+      ${raw(canEdit('visits') ? '<div class="actions"><button class="btn primary" type="button" id="add-v">Record a visit</button></div>' : '')}</div>
     <section class="panel"><h2>Visits to make</h2><div id="v-due"></div></section>
     <form class="filters top-gap" id="v-filters">
       <div class="field grow"><label for="vf-q">Search</label><input id="vf-q" name="q" type="search" placeholder="Place, contact person or remarks" value="${query.q}"></div>

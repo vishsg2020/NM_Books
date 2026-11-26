@@ -58,7 +58,7 @@ function editCallForm(c, after) {
 
 export async function renderList(page, { query }) {
   page.innerHTML = html`<div class="page-head"><div><h1>Calls</h1><div class="sub">${manager() ? 'Every call made by the tele-sales team.' : 'Your calls and the follow-ups waiting for you.'}</div></div>
-      <div class="actions"><a class="btn" href="#/callreport">Report</a>${canEdit('calls') ? '<button class="btn primary" type="button" id="add-call">Log a call</button>' : ''}</div></div>
+      <div class="actions"><a class="btn" href="#/callreport">Report</a>${raw(canEdit('calls') ? '<button class="btn primary" type="button" id="add-call">Log a call</button>' : '')}</div></div>
     <section class="panel" id="fu-panel"><h2>Follow-ups to make</h2><div id="fu"></div></section>
     <form class="filters top-gap" id="cl-filters">
       <div class="field grow"><label for="cf-q">Search</label><input id="cf-q" name="q" type="search" placeholder="Name, phone or remarks" value="${query.q}"></div>
