@@ -4,7 +4,7 @@
 const crypto = require('crypto');
 const { audit } = require('../audit');
 const { bad, notFound, conflict, str, oneOf, idParam, HttpError } = require('../util');
-const { MESSAGE_KINDS, getMessages } = require('../settings');
+const { MESSAGE_KINDS, ORDER_KINDS, getMessages } = require('../settings');
 
 const STATUSES = ['Not contacted yet', 'Contacted', 'No answer', 'Feedback requested', 'Feedback received', 'Review requested', 'Review posted', 'Ordered again', 'Not interested'];
 // How far along a customer is. Something the app notes by itself never moves them back.
@@ -12,7 +12,7 @@ const RANK = { 'Not contacted yet': 0, 'No answer': 1, Contacted: 2, 'Feedback r
 const KIND_STATUS = { feedback: 'Feedback requested', review: 'Review requested' }; // any other message: Contacted
 const LIKED = ['Pictures', 'Easy to read', 'Stories', 'Paper and print', 'Price', 'Other'];
 const REASONS = ['For my child to learn Malayalam', 'As a gift', 'For a school or class', 'For myself', 'Other'];
-const FILTER_KEYS = ['q', 'source', 'orders', 'bulk', 'type', 'state', 'location', 'bought', 'not_bought', 'kind', 'outstanding', 'not_since', 'sort', 'view', 'reason'];
+const FILTER_KEYS = ['q', 'source', 'orders', 'bulk', 'type', 'state', 'location', 'bought', 'not_bought', 'kind', 'outstanding', 'not_since', 'sort', 'view', 'reason', 'ready_for'];
 const MAX_MEMBERS = 5000;
 const CHANGE_DAYS = 7; // a feedback answer can be changed for a week
 const TOKEN = /^[A-Za-z0-9_-]{20,64}$/;
@@ -39,7 +39,7 @@ async function markOrders(db, listId) {
 }
 const newToken = () => crypto.randomBytes(18).toString('base64url'); // 24 characters, not guessable
 
-module.exports = (app, { db, perm, customerQuery, getCharges, getLists }) => {
+module.exports = (app, { db, perm, customerQuery, queryArgs }) => {
   // ── Follow-up lists ──────────────────────────────────────────────────────
   app.get('/api/followups', perm('customers'), async (_req, res) => {
     await markOrders(db);
@@ -56,7 +56,7 @@ module.exports = (app, { db, perm, customerQuery, getCharges, getLists }) => {
     const note = str(req.body.note, { name: 'Note for the team', max: 500 }) || null;
     const raw = req.body.filters && typeof req.body.filters === 'object' ? req.body.filters : {};
     const filters = Object.fromEntries(FILTER_KEYS.filter(k => raw[k] !== undefined && raw[k] !== '').map(k => [k, String(raw[k])]));
-    const { sql, p } = customerQuery(filters, await getCharges(db), await getLists(db));
+    const { sql, p } = customerQuery(filters, ...(await queryArgs()));
     const { n } = await db.get(`SELECT COUNT(*) AS n FROM (${sql}) y`, p);
     if (!n) throw bad('No customers match these filters');
     if (n > MAX_MEMBERS) throw bad(`${n.toLocaleString('en-IN')} customers match. A list can hold up to ${MAX_MEMBERS.toLocaleString('en-IN')}: add a filter to narrow it down.`);
@@ -144,13 +144,16 @@ module.exports = (app, { db, perm, customerQuery, getCharges, getLists }) => {
   // Notes that a WhatsApp message was opened for the customer, and moves them along in their open follow-up lists.
   app.post('/api/customers/:id/messages', perm('customers'), async (req, res) => {
     const cid = idParam(req.params.id);
-    const kind = oneOf(req.body.kind, MESSAGE_KINDS.map(k => k[0]), { required: true, name: 'Message' });
+    const kind = oneOf(req.body.kind, [...MESSAGE_KINDS, ...ORDER_KINDS].map(k => k[0]), { required: true, name: 'Message' });
     const listId = req.body.list_id ? idParam(req.body.list_id) : null;
     const bookId = req.body.book_id ? idParam(req.body.book_id) : null;
+    const saleId = req.body.sale_id ? idParam(req.body.sale_id) : null;
     if (!(await db.get('SELECT 1 FROM customers WHERE id = ?', [cid]))) throw notFound('Customer');
+    if (saleId && !(await db.get('SELECT 1 FROM sales WHERE id = ? AND customer_id = ?', [saleId, cid]))) throw bad('That order is not this customer\'s');
     await db.tx(async t => {
-      await t.run('INSERT INTO customer_messages (customer_id, kind, list_id, book_id, user_id) VALUES (?,?,?,?,?)', [cid, kind, listId, bookId, req.user.id]);
-      await bumpLists(t, cid, KIND_STATUS[kind] || 'Contacted', req.user.id);
+      await t.run('INSERT INTO customer_messages (customer_id, kind, list_id, book_id, sale_id, user_id) VALUES (?,?,?,?,?,?)', [cid, kind, listId, bookId, saleId, req.user.id]);
+      // Order messages are about the order, not a follow-up: they do not move anyone in a list.
+      if (!ORDER_KINDS.some(k => k[0] === kind)) await bumpLists(t, cid, KIND_STATUS[kind] || 'Contacted', req.user.id);
     });
     res.status(201).json({ ok: true });
   });

@@ -12,9 +12,21 @@ module.exports = (app, { db, perm, requireAdmin }) => {
   app.get('/api/settings/lists', async (_req, res) => {
     res.json({ lists: await S.getLists(db), locked: S.LOCKED, names: S.LIST_NAMES, charges: await S.getCharges(db),
       discounts: await P.getDiscounts(db), discount_groups: P.GROUPS, discount_channels: P.CHANNELS, theme: await getTheme(db), themes: THEMES,
-      messages: await S.getMessages(db), message_kinds: S.MESSAGE_KINDS, message_fields: S.MESSAGE_FIELDS });
+      messages: await S.getMessages(db), message_kinds: S.MESSAGE_KINDS, message_fields: S.MESSAGE_FIELDS, order_kinds: S.ORDER_KINDS,
+      shipping: await S.getShipping(db), shipping_fields: S.SHIPPING_FIELDS, next_book: await S.getNextBook(db) });
   });
 
+  app.put('/api/settings/shipping', requireAdmin, async (req, res) => {
+    const before = await S.getShipping(db); const next = S.cleanShipping(req.body);
+    await db.tx(async t => { await S.write(t, 'shipping', next); await audit(t, req.user, 'settings', null, 'shipping_changed', before, next); });
+    res.json(await S.getShipping(db));
+  });
+  app.put('/api/settings/next-book', requireAdmin, async (req, res) => {
+    const skus = new Set((await db.all('SELECT lower(sku) AS s FROM books WHERE active = 1')).map(r => r.s));
+    const before = await S.getNextBook(db); const next = S.cleanNextBook(req.body, skus);
+    await db.tx(async t => { await S.write(t, 'next_book', next); await audit(t, req.user, 'settings', null, 'next_book_changed', before, next); });
+    res.json(await S.getNextBook(db));
+  });
   app.put('/api/settings/messages', requireAdmin, async (req, res) => {
     const before = await S.getMessages(db); const next = S.cleanMessages(req.body);
     await db.tx(async t => { await S.write(t, 'messages', next); await audit(t, req.user, 'settings', null, 'messages_changed', before, next); });

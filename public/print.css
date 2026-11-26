@@ -1,0 +1,71 @@
+/* Print page: address labels (two per A4 page) and bills. */
+@font-face { font-family: Plex; src: url(fonts/ibm-plex-sans-latin-400-normal.woff2) format('woff2'); font-weight: 400; }
+@font-face { font-family: Plex; src: url(fonts/ibm-plex-sans-latin-600-normal.woff2) format('woff2'); font-weight: 600 900; }
+@font-face { font-family: Plex; src: url(fonts/manjari-malayalam-700-normal.woff2) format('woff2'); font-weight: 400 900; unicode-range: U+0D00-0D7F; }
+:root { --ink: #111; --line: #999; --muted: #666; --green: #2E6A1C; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Plex, Arial, sans-serif; color: var(--ink); background: #E5E5E0; }
+.toolbar { position: sticky; top: 0; display: flex; gap: 10px; align-items: center; padding: 10px 16px; background: #fff; border-bottom: 1px solid #ccc; z-index: 2; }
+.toolbar span { flex: 1; font-weight: 600; }
+.toolbar button { font: inherit; padding: 8px 16px; border-radius: 6px; border: 1px solid #999; background: #fff; cursor: pointer; }
+.toolbar button:first-of-type { background: var(--green); border-color: var(--green); color: #fff; }
+.err { margin: 40px auto; max-width: 520px; background: #fff; padding: 20px; border-radius: 8px; }
+.k { color: var(--muted); font-size: 8.5pt; }
+.small { font-size: 8.5pt; }
+
+/* Labels: an A4 page holds two. */
+/* (Fonts load before printing: main() waits for document.fonts.) */
+.sheet { width: 210mm; height: 297mm; margin: 12px auto; background: #fff; padding: 10mm; display: flex; flex-direction: column; gap: 8mm; }
+.label { border: 1.5px solid var(--ink); height: 134mm; display: grid; grid-template-rows: auto auto 1fr auto; overflow: hidden; font-size: 10pt; }
+.label .top { display: grid; grid-template-columns: 57% 43%; border-bottom: 1px solid var(--line); }
+.label .to { padding: 3mm 5mm; }
+.label .name { font-size: 15pt; font-weight: 800; margin: 1mm 0 1.5mm; }
+.label .addr { font-size: 10.5pt; line-height: 1.3; }
+.label .big { font-size: 11.5pt; font-weight: 800; margin-top: 1.5mm; }
+.label .right { border-left: 1px solid var(--line); display: flex; flex-direction: column; }
+.label .pay { background: var(--ink); color: #fff; font-weight: 800; padding: 1.8mm 4mm; font-size: 10pt; white-space: nowrap; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.label .pay span { font-weight: 400; }
+.label .pay.cod { background: #fff; color: var(--ink); border-bottom: 2px solid var(--ink); }
+.label .trk { padding: .8mm 4mm 1.2mm; border-bottom: 1px solid #bbb; }
+.label .bc svg { width: 100%; height: 12mm; display: block; }
+.label .n { text-align: center; font: 700 10pt monospace; letter-spacing: 2px; }
+.label .blank { height: 16mm; border: 1px dashed #999; border-radius: 2px; margin-top: 1mm; display: flex; align-items: center; justify-content: center; color: #999; font-size: 9pt; }
+.label .brand { display: flex; align-items: center; justify-content: space-between; padding: 2mm 4mm; border-bottom: 1px solid #bbb; }
+.label .brand img { height: 11mm; }
+.label .brand b { font-size: 12pt; }
+.label .ids { display: grid; grid-template-columns: 1fr 1fr; gap: .5mm 3mm; padding: 1.5mm 4mm; font-size: 8pt; }
+.label .ids b { display: block; font-size: 9pt; }
+.label .od .h { background: #eee; padding: 1mm 5mm; font-weight: 700; border-bottom: 1px solid var(--line); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.label .row { display: grid; grid-template-columns: 28% 72%; border-bottom: 1px solid var(--line); }
+.label .row > div { padding: 1.5mm 5mm; }
+.label .row > div:first-child { font-weight: 700; border-right: 1px solid var(--line); }
+.label .oid { display: flex; justify-content: space-between; align-items: center; font-weight: 800; font-size: 11pt; }
+.label .bc.small { width: 45%; }
+.label .bc.small svg { height: 7mm; }
+.label .from { padding: 1.5mm 5mm; border-top: 1px solid var(--line); }
+.label .from b { display: block; font-size: 10.5pt; margin: .3mm 0; }
+
+/* Bill: one A4 page. */
+.bill { width: 210mm; min-height: 297mm; margin: 12px auto; background: #fff; padding: 16mm 15mm; font-size: 10.5pt; }
+.bill header { display: grid; grid-template-columns: 18mm 1fr auto; gap: 5mm; align-items: start; border-bottom: 2px solid var(--green); padding-bottom: 5mm; }
+.bill header img { width: 18mm; }
+.bill h1 { margin: 0; font-size: 17pt; color: var(--green); }
+.bill h2 { margin: 0; font-size: 15pt; text-transform: uppercase; letter-spacing: 2px; }
+.bill .billno { text-align: right; }
+.bill .billto { margin: 6mm 0; line-height: 1.45; }
+.bill table { width: 100%; border-collapse: collapse; }
+.bill th, .bill td { border-bottom: 1px solid #ccc; padding: 2.2mm 2mm; text-align: left; }
+.bill th { background: #F1F5EE; font-size: 9.5pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.bill .num { text-align: right; }
+.bill .sums { display: grid; grid-template-columns: 1fr 35mm; gap: 1.5mm 4mm; margin: 5mm 0 5mm auto; width: 95mm; }
+.bill .sums dt { text-align: right; color: var(--muted); }
+.bill .sums dd { margin: 0; text-align: right; }
+.bill .sums .total { font-weight: 800; font-size: 12.5pt; color: var(--ink); border-top: 1px solid #999; padding-top: 1.5mm; }
+.bill footer { margin-top: 14mm; border-top: 1px solid #ccc; padding-top: 3mm; color: var(--muted); font-size: 9pt; text-align: center; }
+
+@page { size: A4; margin: 0; }
+@media print {
+  body { background: #fff; }
+  .toolbar { display: none; }
+  .sheet, .bill { margin: 0; box-shadow: none; page-break-after: always; break-after: page; }
+}

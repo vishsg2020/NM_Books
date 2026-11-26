@@ -1,7 +1,7 @@
 // WhatsApp messages to customers, one chat at a time: pick the kind of message, check the text, then open each chat
 // with it typed in. The app sends nothing itself; the person presses Send in WhatsApp. Opening a chat is noted on the
 // customer (and moves them along in their open follow-up lists). The wording is in Settings → Customer messages.
-import { api, esc, html, raw, table, drawer, options, toast, state, waLink, canEdit } from '../core.js';
+import { api, esc, html, raw, table, drawer, options, toast, state, waLink, canEdit, fmtDate, inr, todayLocal } from '../core.js';
 
 const firstName = c => {
   const n = String(c.name || '').trim();
@@ -80,4 +80,36 @@ export function whatsappDrawer(customers, opts = {}) {
       setKind(kind);
     },
   });
+}
+
+// ---------- Messages about one order (order confirmation, dispatched) ----------
+
+/** The text of an order message for this sale, from the wording in Settings → Customer messages. */
+export function orderMessage(s, kind) {
+  const m = state.messages; const ship = state.shipping || { couriers: [] };
+  const name = firstName({ name: s.customer_name, type: 'Individual' });
+  const books = s.total_amount - (s.delivery_charge || 0) - (s.cod_charge || 0);
+  const items = s.items.map(i => `• ${i.book_name} × ${i.qty} — ${inr(i.line_total)}`).join('\n');
+  const charges = (s.delivery_charge || s.cod_charge) ? `Books ${inr(books)}\n${s.delivery_charge ? `Delivery ${inr(s.delivery_charge)}\n` : ''}${s.cod_charge ? `COD charge ${inr(s.cod_charge)}\n` : ''}` : '';
+  let payment;
+  if (s.balance <= 0) payment = 'Paid in full. Thank you!';
+  else if (s.payment_method === 'COD') payment = `Please pay ${inr(s.balance)} in cash when the books arrive.`;
+  else if (m.upi_id) payment = `Please pay ${inr(s.balance)} by UPI to ${m.upi_id}${m.upi_name ? ` (${m.upi_name})` : ''} and send us the screenshot here.`;
+  else payment = `Amount to pay: ${inr(s.balance)}.`;
+  const courier = ship.couriers.find(c => c.name === s.courier);
+  const vals = { name, order_no: s.sale_no, date: fmtDate(kind === 'dispatched' ? todayLocal() : s.sale_date), items, charges, total: String(s.total_amount),
+    payment, courier: s.courier || 'courier', tracking: s.tracking_no || '(tracking number)', tracking_link: courier?.url || m.website_url, website: m.website_url };
+  return (m.templates[kind] || '').replace(/\{(\w+)\}/g, (all, k) => (k in vals ? String(vals[k] ?? '') : all)).replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Notes on the customer that an order message was opened. */
+export function logOrderMessage(s, kind) {
+  if (s.customer_id && canEdit('customers')) api('POST', `/api/customers/${s.customer_id}/messages`, { kind, sale_id: s.id }).catch(() => {});
+}
+/** Opens WhatsApp with an order message and notes it on the customer. Call it straight from a click. */
+export function sendOrderMessage(s, kind) {
+  const link = waLink(s.customer_phone, orderMessage(s, kind));
+  if (!link) { toast('This order has no number WhatsApp can use', 'error'); return; }
+  window.open(link, '_blank', 'noopener');
+  logOrderMessage(s, kind);
 }

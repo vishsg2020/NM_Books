@@ -121,11 +121,11 @@ module.exports = (app, { db, load, perm }) => {
         const { n } = await t.get(`SELECT nextval('sale_number_seq') AS n`);
         const s = await t.get(`INSERT INTO sales (sale_no, sale_date, channel, salesperson_id, customer_id, customer_name, customer_phone, address,
             platform, platform_order_id, location_type, location_name, contact_person, next_visit_date, status,
-            total_amount, amount_received, payment_method, payment_status, due_date, remarks, request_key, created_by, delivery_charge, cod_charge)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id, sale_no`,
+            total_amount, amount_received, payment_method, payment_status, due_date, remarks, request_key, created_by, delivery_charge, cod_charge, gift_pack)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id, sale_no`,
         ['S-' + String(n).padStart(6, '0'), saleDate, channel, salespersonId, cust ? cust.id : null, customerName, phone, address,
           f.platform, f.platform_order_id, f.location_type, f.location_name, f.contact_person, f.next_visit_date, status,
-          total, received, method, paymentStatus(total, received, method), dueDate, remarks, requestKey, me.id, delivery, cod]);
+          total, received, method, paymentStatus(total, received, method), dueDate, remarks, requestKey, me.id, delivery, cod, b.gift_pack === true || b.gift_pack === 1 || b.gift_pack === '1' || b.gift_pack === 'on' ? 1 : 0]);
         // Lock books in a fixed order so two sales of the same books cannot deadlock.
         for (const it of items) {
           await t.run('INSERT INTO sale_items (sale_id, book_id, qty, unit_price, line_total) VALUES (?,?,?,?,?)', [s.id, it.book_id, it.qty, it.unit_price, it.line_total]);

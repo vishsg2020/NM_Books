@@ -1063,3 +1063,55 @@ test('customer messages: the Admin sets the wording; everyone signed in reads it
   const tok = (await db.get('SELECT token FROM feedback ORDER BY id LIMIT 1')).token;
   assert.equal((await anon.get(`/api/public/feedback/${tok}`)).data.review_url, 'https://www.nallamalayalam.in/reviews');
 });
+
+test('labels and bills: label details in Settings, gift pack, courier and tracking number, order messages', async () => {
+  const st = (await T.get('/api/settings/lists')).data;
+  assert.equal(st.shipping.booking_office, 'Kodakara SO 680684'); assert.deepEqual(st.shipping.couriers.map(c => c.name), ['India Post (Speed Post)', 'DTDC']);
+  assert.ok(st.order_kinds.some(k => k[0] === 'dispatched')); assert.match(st.messages.templates.order, /\{payment\}/);
+  assert.equal((await M.send('PUT', '/api/settings/shipping', st.shipping)).status, 403);
+  assert.equal((await A.send('PUT', '/api/settings/shipping', { ...st.shipping, couriers: 'DTDC | http://dtdc.in' })).status, 400);
+  ok(await A.send('PUT', '/api/settings/shipping', { ...st.shipping, couriers: 'India Post (Speed Post) | https://www.indiapost.gov.in\nDTDC | https://www.dtdc.in' }), 200);
+  // a tele-sales order with a gift pack
+  const s = ok(await T.post('/api/sales', { customer_name: 'Gift Buyer', customer_phone: '9700000011', address: 'House 4, Market Road', state: 'Kerala', location: 'Thrissur', pin: '680684', gift_pack: true, payment_method: 'COD', amount_received: 0, items: [{ book_id: maam.id, qty: 1 }] }));
+  assert.equal(s.gift_pack, 1); assert.equal(s.customer_pin, '680684'); assert.equal(s.customer_district, 'Thrissur');
+  // dispatch adds the courier and tracking number before printing; sales people cannot
+  assert.equal((await T.patch(`/api/sales/${s.id}/shipping`, { courier: 'DTDC', tracking_no: 'D1' })).status, 403);
+  assert.equal((await D.patch(`/api/sales/${s.id}/shipping`, { courier: 'Blue Dart', tracking_no: 'D1' })).status, 400);
+  assert.equal((await D.patch(`/api/sales/${s.id}/shipping`, { courier: 'DTDC', tracking_no: 'D1 <x>' })).status, 400);
+  const sh = ok(await D.patch(`/api/sales/${s.id}/shipping`, { courier: 'DTDC', tracking_no: 'd59213847' }), 200);
+  assert.equal(sh.tracking_no, 'D59213847'); assert.equal(sh.courier, 'DTDC'); assert.equal(sh.gift_pack, 1);
+  // marking Dispatched can change them
+  const disp = ok(await D.post(`/api/sales/${s.id}/status`, { status: 'Dispatched', courier: 'India Post (Speed Post)', tracking_no: 'EL900217276IN' }), 200);
+  assert.equal(disp.status, 'Dispatched'); assert.equal(disp.courier, 'India Post (Speed Post)'); assert.equal(disp.tracking_no, 'EL900217276IN');
+  // order messages are noted on the customer but move nobody in a follow-up list
+  ok(await T.post(`/api/customers/${s.customer_id}/messages`, { kind: 'order', sale_id: s.id }));
+  assert.equal((await T.post(`/api/customers/${s.customer_id}/messages`, { kind: 'dispatched', sale_id: maam.id + 999999 })).status, 400);
+  const c = (await T.get(`/api/customers/${s.customer_id}`)).data;
+  assert.equal(c.messages[0].kind, 'order');
+});
+
+test('next book: customers with the first book but not the next, after the waiting time; a list made for the step', async () => {
+  const b1 = ok(await A.post('/api/books', { sku: 'NB-1', name: 'Next Book One', mrp: 100, price: 100, opening_stock: 20 }));
+  const b2 = ok(await A.post('/api/books', { sku: 'NB-2', name: 'Next Book Two', mrp: 100, price: 100, opening_stock: 20 }));
+  assert.equal((await A.send('PUT', '/api/settings/next-book', { months: 5, steps: [['NB-1', 'NB-2']] })).status, 400);
+  assert.equal((await A.send('PUT', '/api/settings/next-book', { months: 1, steps: [['NB-1', 'NO-SUCH']] })).status, 400);
+  assert.equal((await M.send('PUT', '/api/settings/next-book', { months: 1, steps: [['NB-1', 'NB-2']] })).status, 403);
+  ok(await A.send('PUT', '/api/settings/next-book', { months: 1, steps: [['NB-1', 'NB-2']] }), 200);
+  const buy = (phone, name, book, date) => T.post('/api/sales', { customer_name: name, customer_phone: phone, address: 'House 9, Hill Road', state: 'Kerala', location: 'Kollam', pin: '691001', sale_date: date, items: [{ book_id: book, qty: 1 }] });
+  ok(await buy('9700000021', 'Ready Reader', b1.id, '2026-09-01'));       // ready: NB-1 two months ago
+  ok(await buy('9700000022', 'Recent Reader', b1.id, '2026-11-10'));      // not yet: bought last week
+  ok(await buy('9700000023', 'Done Reader', b1.id, '2026-08-01')); ok(await buy('9700000023', 'Done Reader', b2.id, '2026-08-05')); // has both
+  const key = 'NB-1>NB-2';
+  const names = (await T.get('/api/customers?ready_for=' + encodeURIComponent(key))).data.rows.map(r => r.name);
+  assert.deepEqual(names, ['Ready Reader']);
+  assert.equal((await T.get('/api/customers?ready_for=NB-9>NB-2')).status, 400);
+  let nb = ok(await T.get('/api/customers/next-book'), 200);
+  assert.equal(nb.months, 1); assert.equal(nb.steps[0].ready, 1); assert.equal(nb.steps[0].to.name, 'Next Book Two');
+  const list = ok(await T.post('/api/followups', { name: 'Ready for NB-2', filters: { ready_for: key } }));
+  assert.equal(list.total, 1);
+  nb = (await T.get('/api/customers/next-book')).data;
+  assert.equal(nb.steps[0].ready, 0); // already in an open list for this step
+  ok(await T.post(`/api/followups/${list.id}/close`), 200);
+  assert.equal((await T.get('/api/customers/next-book')).data.steps[0].ready, 1);
+  assert.equal((await D.get('/api/customers/next-book')).status, 403);
+});

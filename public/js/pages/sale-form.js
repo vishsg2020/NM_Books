@@ -98,6 +98,7 @@ export async function saleForm({ customer = null, after = () => {}, callId = nul
         <dl class="totals"><dt class="charge-row">Books</dt><dd class="charge-row" id="s-books-total">₹0</dd><dt class="charge-row">Delivery charge</dt><dd class="charge-row" id="s-dc-total">₹0</dd><dt class="charge-row">COD charge</dt><dd class="charge-row" id="s-cc-total">₹0</dd>
           <dt>Total amount</dt><dd class="big" id="s-total">₹0</dd><dt>Balance amount</dt><dd id="s-balance">₹0</dd><dt>Payment status</dt><dd id="s-pstatus">Unpaid</dd></dl>
       </fieldset>
+      <label class="check gift-f"><input type="checkbox" name="gift_pack" id="s-gift"> Gift pack <span class="muted small">(printed on the label)</span></label>
       <div class="field"><label for="s-rem">Remarks</label><textarea id="s-rem" name="remarks" maxlength="1000"></textarea></div>
     </form>`,
     foot: `<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="s-form">Save sale</button>`,
@@ -208,6 +209,7 @@ export async function saleForm({ customer = null, after = () => {}, callId = nul
         d.querySelector('button[form=s-form]').textContent = onsite ? 'Save visit' : 'Save sale';
         $('#s-books-hint').textContent = onsite ? 'Leave this empty if nothing was sold on the visit.' : fair ? 'The books are handed over now: stock is deducted as soon as you save.' : '';
         $('#s-due-hint').textContent = onsite ? 'Needed when a balance remains.' : 'For any balance.';
+        d.querySelector('.gift-f')?.classList.toggle('hidden', onsite || fair); // handed over in person: no parcel
         // A tele-sales order and an exhibition sale have no due date.
         $('#s-due-f').classList.toggle('hidden', ch === 'Tele-sales' || fair); if (ch === 'Tele-sales' || fair) $('#s-due').value = '';
         $('#s-charges').classList.toggle('hidden', ch !== 'Tele-sales');
@@ -240,7 +242,7 @@ export async function saleForm({ customer = null, after = () => {}, callId = nul
         }
         if (!items.length) throw new Error('Select at least one book');
         const onsite = channel === 'Onsite' || channel === 'Exhibition';
-        const body = { ...v, channel: onsite ? 'Onsite' : channel, items, request_key: requestKey, call_id: callId || undefined };
+        const body = { ...v, channel: onsite ? 'Onsite' : channel, items, request_key: requestKey, call_id: callId || undefined, gift_pack: !onsite && !!v.gift_pack };
         if (channel === 'Tele-sales') { body.delivery_charge = Number(form.dataset.delivery) || 0; body.cod_charge = Number(form.dataset.cod) || 0; }
         if (channel === 'Exhibition') { body.handed_over = true; if (v.location_name) keepFair(v.location_name.trim()); }
         const sale = await api('POST', '/api/sales', body);

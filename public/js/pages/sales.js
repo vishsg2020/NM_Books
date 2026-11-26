@@ -1,5 +1,6 @@
-import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, can, fmtDate, fmtStamp, parseHash, setQuery, wireFilters, qs, state, myChannel, todayLocal, drawerGeneration, reasonBox, wide, canEdit, isAdmin } from '../core.js';
+import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, can, canView, waLink, fmtDate, fmtStamp, parseHash, setQuery, wireFilters, qs, state, myChannel, todayLocal, drawerGeneration, reasonBox, wide, canEdit, isAdmin } from '../core.js';
 import { saleForm } from './sale-form.js';
+import { sendOrderMessage, orderMessage, logOrderMessage } from './messages.js';
 
 const STATUSES = ['Confirmed', 'Packing', 'Ready to Dispatch', 'Dispatched', 'Delivered', 'Completed', 'Cancelled'];
 const FLOW = ['Confirmed', 'Packing', 'Ready to Dispatch', 'Dispatched', 'Delivered'];
@@ -11,7 +12,7 @@ export async function renderList(page, { query }) {
   const wideRole = wide(); const dispatch = can('dispatch');
   page.innerHTML = html`<div class="page-head"><div><h1>${dispatch ? 'Orders' : 'Sales'}</h1>
       <div class="sub">${dispatch ? 'Orders to pack, dispatch and deliver.' : myChannel() ? `${myChannel()} sales and orders.` : 'Every sale across Tele-sales, Online and Onsite.'}</div></div>
-    ${raw(sellers() ? `<div class="actions"><button class="btn primary" type="button" id="add-s">${myChannel() === 'Onsite' ? 'Record a visit' : 'Record a sale'}</button></div>` : '')}</div>
+    <div class="actions">${raw(canView('dispatch') ? '<button class="btn" type="button" id="print-labels">Print labels</button>' : '')}${raw(sellers() ? `<button class="btn primary" type="button" id="add-s">${myChannel() === 'Onsite' ? 'Record a visit' : 'Record a sale'}</button>` : '')}</div></div>
     <form class="filters" id="s-filters">
       <div class="field grow"><label for="sf-q">Search</label><input id="sf-q" name="q" type="search" placeholder="Customer, phone, sale or order number" value="${query.q}"></div>
       ${raw(wideRole || dispatch ? `<div class="field"><label for="sf-ch">Channel</label><select id="sf-ch" name="channel">${options(['Tele-sales', 'Online', 'Onsite'], query.channel, 'All channels')}</select></div>` : '')}
@@ -23,10 +24,10 @@ export async function renderList(page, { query }) {
       <div class="field"><label for="sf-t">To</label><input id="sf-t" name="date_to" type="date" value="${query.date_to}"></div>
       <button class="btn" type="button" data-clear>Clear filters</button>
     </form><p class="list-totals" id="s-totals"></p><div id="s-list"></div>`;
-  const list = page.querySelector('#s-list');
+  const list = page.querySelector('#s-list'); let shown = [];
   const load = async () => {
     const q = { ...parseHash().query }; delete q.new; delete q.open;
-    const r = await get('/api/sales' + qs(q)); const t = r.totals;
+    const r = await get('/api/sales' + qs(q)); const t = r.totals; shown = r.rows;
     page.querySelector('#s-totals').innerHTML = `<span><b>${t.orders}</b> sale${t.orders === 1 ? '' : 's'}</span><span>Total <b>${esc(inr(t.amount))}</b></span>
       <span>Received <b>${esc(inr(t.received))}</b></span><span>Balance <b>${esc(inr(t.balance))}</b></span>${r.truncated ? '<span>Showing the newest 500. Narrow the filters to see the rest.</span>' : ''}`;
     const any = Object.keys(q).length;
@@ -42,7 +43,13 @@ export async function renderList(page, { query }) {
   };
   wireFilters(page.querySelector('#s-filters'), load);
   const changed = () => { window.dispatchEvent(new Event('nm:changed')); load(); };
-  const saved = s => { changed(); if (s) openSale(s.id, changed); };
+  const saved = s => { changed(); if (s) openSale(s.id, changed, { justSaved: true }); };
+  // Labels: the orders shown that go by post (not onsite, not cancelled or already delivered), up to 100.
+  page.querySelector('#print-labels')?.addEventListener('click', () => {
+    const ids = shown.filter(x => x.channel !== 'Onsite' && FLOW.includes(x.status) && FLOW.indexOf(x.status) <= FLOW.indexOf('Dispatched')).slice(0, 100).map(x => x.id);
+    if (!ids.length) { toast('No orders to post in this list. Try Status: Not yet dispatched.', 'error'); return; }
+    window.open(`/print.html?labels=${ids.join(',')}`, '_blank', 'noopener');
+  });
   page.querySelector('#add-s')?.addEventListener('click', () => saleForm({ after: saved }));
   list.addEventListener('click', e => { const b = e.target.closest('[data-open]'); if (b) openSale(b.dataset.open, changed); });
   await load();
@@ -55,7 +62,7 @@ function strip(key) { const q = { ...parseHash().query }; delete q[key]; delete 
 const fact = (k, v) => (v === null || v === undefined || v === '' ? '' : `<dt>${esc(k)}</dt><dd>${v}</dd>`);
 
 /** Opens the sale drawer: details, payments, dispatch steps and history. */
-export async function openSale(id, after = () => {}) {
+export async function openSale(id, after = () => {}, opts = {}) {
   const gen = drawerGeneration();
   const s = await get(`/api/sales/${id}`);
   if (gen !== drawerGeneration()) return; // the user closed the drawer or moved on while this was loading
@@ -65,18 +72,27 @@ export async function openSale(id, after = () => {}) {
   const canPay = sellers() && s.status !== 'Cancelled' && s.balance > 0;
   const overdue = s.balance > 0 && s.due_date && s.due_date < todayLocal() && s.status !== 'Cancelled';
   const refresh = () => { after(); openSale(id, after); };
+  const post = s.channel !== 'Onsite' && !s.imported;
+  const shipEdit = post && canEdit('dispatch') && s.status !== 'Cancelled' && FLOW.indexOf(s.status) < FLOW.indexOf('Delivered') && FLOW.includes(s.status);
   drawer({
     wide: true,
     title: `${s.sale_no} · ${s.customer_name}`,
     body: `
       <div class="status-line">${pill(s.status).__raw}${pill(overdue ? 'Overdue' : s.payment_status).__raw}<span class="muted">${esc(s.channel)}${s.platform ? ' · ' + esc(s.platform) : ''} · ${esc(fmtDate(s.sale_date))}</span></div>
       ${s.status === 'Cancelled' ? `<div class="notice warn">Cancelled: ${esc(s.cancel_reason)}</div>` : ''}
+      ${opts.justSaved && waLink(s.customer_phone) && s.channel !== 'Onsite' ? `<div class="notice info"><b>Sale saved.</b> Send the order details to the customer on WhatsApp? <button class="btn small primary" type="button" data-wa-order="order">Send order confirmation</button></div>` : ''}
       <div class="btn-row">
         ${canMove && next ? `<button class="btn primary" type="button" data-move="${esc(next)}">${esc(NEXT_LABEL[next])}</button>` : ''}
         ${canMove && open && next !== 'Dispatched' ? '<button class="btn" type="button" data-move="Dispatched">Mark dispatched</button>' : ''}
         ${canPay ? '<button class="btn" type="button" id="pay-btn">Record payment</button>' : ''}
         ${isAdmin() && s.status !== 'Cancelled' ? '<button class="btn" type="button" id="edit-btn">Edit sale</button>' : ''}
         ${sellers() && open ? '<button class="btn danger" type="button" id="cancel-btn">Cancel order</button>' : ''}
+      </div>
+      <div class="btn-row">
+        <a class="btn small" href="/print.html?bill=${s.id}" target="_blank" rel="noopener">Print bill</a>
+        ${post && canView('dispatch') ? `<a class="btn small" href="/print.html?labels=${s.id}" target="_blank" rel="noopener">Print label</a>` : ''}
+        ${s.status !== 'Cancelled' && waLink(s.customer_phone) && canEdit('sales') && !opts.justSaved ? '<button class="btn small" type="button" data-wa-order="order">WhatsApp: order confirmation</button>' : ''}
+        ${post && s.tracking_no && waLink(s.customer_phone) && ['Dispatched', 'Delivered'].includes(s.status) ? '<button class="btn small" type="button" data-wa-order="dispatched">WhatsApp: dispatched message</button>' : ''}
       </div>
       <div id="pay-slot"></div>
       <dl class="facts">
@@ -90,7 +106,15 @@ export async function openSale(id, after = () => {}) {
         ${fact('Next visit', s.next_visit_date ? esc(fmtDate(s.next_visit_date)) : '')}
         ${fact('Sales person', esc(s.salesperson_name) + (s.created_by_name !== s.salesperson_name ? ` <span class="muted">entered by ${esc(s.created_by_name)}</span>` : ''))}
         ${fact('Remarks', esc(s.remarks))}
+        ${post ? fact('Gift pack', s.gift_pack ? 'Yes' : 'No') : ''}
+        ${post ? fact('Courier', s.courier ? `${esc(s.courier)}${s.tracking_no ? ` · <b>${esc(s.tracking_no)}</b>` : ''}` : '') : ''}
       </dl>
+      ${shipEdit ? `<details class="ship-edit"${s.tracking_no ? '' : ' open'}><summary>Courier and tracking number${s.tracking_no ? '' : ' (for the label)'}</summary>
+        <form id="ship-form" class="grid3" novalidate>
+          <div class="field"><label for="sh-c">Courier</label><select id="sh-c" name="courier">${options(state.shipping.couriers.map(c => c.name), s.courier || state.shipping.couriers[0]?.name)}</select></div>
+          <div class="field"><label for="sh-t">Tracking number</label><input id="sh-t" name="tracking_no" maxlength="40" autocomplete="off" value="${esc(s.tracking_no || '')}" placeholder="Type or scan"></div>
+          <div class="field"><label class="check"><input type="checkbox" name="gift_pack" ${s.gift_pack ? 'checked' : ''}> Gift pack</label><button class="btn small" type="submit">Save</button></div>
+        </form></details>` : ''}
       <h3>Books</h3>
       ${table([
         { label: 'Book', cell: i => `${esc(i.book_name)}<span class="sub">${esc(i.sku)}</span>` },
@@ -119,7 +143,11 @@ export async function openSale(id, after = () => {}) {
       <ul class="timeline">${s.history.map(h => `<li><strong>${esc(h.action.replace(/_/g, ' '))}</strong>${h.after && h.before ? ' · ' + Object.keys(h.after).map(k => `${esc(k.replace(/_/g, ' '))}: ${esc(h.before[k])} → ${esc(h.after[k])}`).join(', ') : ''}${h.reason ? ' · ' + esc(h.reason) : ''}
         <div class="muted">${esc(h.user_name || 'system')} · ${esc(fmtStamp(h.at))}</div></li>`).join('')}</ul>`,
     onMount: d => {
+      d.querySelectorAll('[data-wa-order]').forEach(b => b.addEventListener('click', () => sendOrderMessage(s, b.dataset.waOrder)));
+      const sf = d.querySelector('#ship-form');
+      if (sf) onSubmit(sf, async v => { await api('PATCH', `/api/sales/${s.id}/shipping`, { courier: v.courier, tracking_no: v.tracking_no, gift_pack: !!v.gift_pack }); toast('Saved'); refresh(); });
       d.querySelectorAll('[data-move]').forEach(b => b.addEventListener('click', async () => {
+        if (b.dataset.move === 'Dispatched' && post) { dispatchForm(s, refresh, () => openSale(id, after)); return; }
         b.disabled = true;
         try { await api('POST', `/api/sales/${s.id}/status`, { status: b.dataset.move }); toast(`${s.sale_no} is now ${b.dataset.move}`); refresh(); }
         catch (e) { b.disabled = false; toast(e.message, 'error'); }
@@ -248,6 +276,39 @@ function editSaleForm(s, done, back) {
         const items = [...lines.querySelectorAll('tr')].map(r => ({ book_id: r.querySelector('select').value, qty: r.querySelector('[data-qty]').value, unit_price: r.querySelector('[data-price]').value })).filter(i => i.book_id);
         await api('PATCH', `/api/sales/${s.id}`, { ...v, items });
         toast(`${s.sale_no} changed`); window.dispatchEvent(new Event('nm:changed')); done();
+      });
+    },
+  });
+}
+
+/** Mark an order Dispatched: courier and tracking number, then the WhatsApp message to the customer. */
+function dispatchForm(s, done, back) {
+  const couriers = state.shipping.couriers;
+  drawer({
+    wide: true,
+    title: `Mark ${s.sale_no} as Dispatched`,
+    body: html`<form id="dp-form" novalidate><div class="grid2">
+        <div class="field"><label for="dp-c">Courier *</label><select id="dp-c" name="courier">${raw(options(couriers.map(c => c.name), s.courier || couriers[0]?.name))}</select></div>
+        <div class="field"><label for="dp-t">Tracking number</label><input id="dp-t" name="tracking_no" maxlength="40" autocomplete="off" value="${s.tracking_no || ''}" placeholder="Type or scan"></div></div>
+      <div class="field"><span class="label">Message to the customer</span><div class="wa-preview" id="dp-msg"></div></div>
+      ${raw(waLink(s.customer_phone) ? '<label class="check"><input type="checkbox" name="send" checked> Open WhatsApp with this message after saving</label>' : '<p class="muted">This order has no number WhatsApp can use.</p>')}
+      </form>`,
+    foot: '<button class="btn" type="button" id="dp-back">Back</button><button class="btn primary" type="submit" form="dp-form">Mark as Dispatched</button>',
+    onMount: (d, close) => {
+      const f = d.querySelector('#dp-form');
+      const preview = () => { d.querySelector('#dp-msg').textContent = orderMessage({ ...s, courier: f.courier.value, tracking_no: f.tracking_no.value.trim().toUpperCase() }, 'dispatched'); };
+      f.addEventListener('input', preview); f.addEventListener('change', preview); preview();
+      d.querySelector('#dp-back').addEventListener('click', back);
+      onSubmit(f, async v => {
+        // The WhatsApp tab is opened now, while this is still the click, and filled in once the order is saved
+        // (browsers block windows opened later).
+        const w = v.send ? window.open('about:blank', '_blank') : null;
+        if (w) w.opener = null;
+        try {
+          const r = await api('POST', `/api/sales/${s.id}/status`, { status: 'Dispatched', courier: v.courier, tracking_no: v.tracking_no });
+          if (w) { w.location.href = waLink(r.customer_phone, orderMessage(r, 'dispatched')); logOrderMessage(r, 'dispatched'); }
+        } catch (err) { if (w) w.close(); throw err; }
+        close(); toast(`${s.sale_no} is now Dispatched`); done();
       });
     },
   });

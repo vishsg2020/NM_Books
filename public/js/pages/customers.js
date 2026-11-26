@@ -25,20 +25,23 @@ const reasonPills = c => (c.needs || []).map(r => `<span class="pill amber">${es
 
 export async function renderList(page, { query }) {
   if (query.view === 'feedback') return renderFeedback(page);
+  if (query.view === 'next') return renderNextBook(page);
   const update = query.view === 'update';
   const [locations, sum] = await Promise.all([get('/api/customers/locations'), get('/api/customers/update-summary')]);
   const products = state.books.filter(b => b.active && b.sku !== 'OTHER').map(b => [b.id, b.name]);
   const n = v => Number(v || 0).toLocaleString('en-IN');
   const tabs = `<nav class="tabs" aria-label="Customer lists"><a href="#/customers" ${update ? '' : 'aria-current="page"'}>Customers <span class="count">${n(sum.complete)}</span></a>
     <a href="#/customers?view=update" ${update ? 'aria-current="page"' : ''}>Update needed <span class="count">${n(sum.needing + sum.sales_without_customer)}</span></a>
-    <a href="#/customers?view=feedback">Feedback <span class="count">${n(sum.feedback)}</span></a></nav>`;
+    <a href="#/customers?view=next">Next book</a>
+    <a href="#/customers?view=feedback">Feedback <span class="count">${n(sum.feedback)}</span></a></nav>
+    ${query.ready_for ? `<div class="notice info">Showing customers ready for the next book: <b>${esc(String(query.ready_for).replace('>', ' → '))}</b>. <a href="#/customers?view=next">Back to Next book</a></div>` : ''}`;
   page.innerHTML = html`<div class="page-head"><div><h1>Customers</h1><div class="sub">${update ? 'Records that are missing a detail or need a check before they join the customer list.' : 'Complete customer records. A customer is recognised by their contact number.'}</div></div>
       <div class="actions">${raw(!update && wide() ? '<button class="btn" type="button" id="gc-dl">Download for Google Contacts</button>' : '')}${raw(update ? '' : '<button class="btn" type="button" id="wa-all">WhatsApp the customers shown</button>')}${raw(!update && canEdit('customers') ? '<button class="btn primary" type="button" id="save-list">Save as a follow-up list</button>' : '')}</div></div>
     ${raw(tabs)}
     ${raw(update ? `<div class="chips">${REASONS.map(r => `<a class="chip${query.reason === r ? ' on' : ''}" href="#/customers?view=update${query.reason === r ? '' : '&reason=' + encodeURIComponent(r)}" title="${esc(REASON_HELP[r])}">${esc(r)} <b>${n(sum.reasons[r])}</b></a>`).join('')}
       <a class="chip" href="#dup-sec">Possible duplicates <b id="dup-count">…</b></a><a class="chip" href="#nocust-sec">Sales with no customer <b>${n(sum.sales_without_customer)}</b></a></div>` : '')}
     <form class="filters" id="c-filters">
-      ${raw(update ? '<input type="hidden" name="view" value="update">' : '')}
+      ${raw(update ? '<input type="hidden" name="view" value="update">' : '')}${raw(query.ready_for ? `<input type="hidden" name="ready_for" value="${esc(query.ready_for)}">` : '')}
       <div class="field grow"><label for="cf-q">Search</label><input id="cf-q" name="q" type="search" placeholder="Name, phone or customer ID" value="${query.q}"></div>
       ${raw(update ? `<div class="field"><label for="cf-r">Reason</label><select id="cf-r" name="reason">${options(REASONS, query.reason, 'All reasons')}</select></div>` : '')}
       <div class="field"><label for="cf-src">Added from</label><select id="cf-src" name="source">${raw(options(SOURCES, query.source, 'Anywhere'))}</select></div>
@@ -247,6 +250,7 @@ async function renderFeedback(page) {
   page.innerHTML = `<div class="page-head"><div><h1>Customers</h1><div class="sub">What customers said through their feedback links.</div></div></div>
     <nav class="tabs" aria-label="Customer lists"><a href="#/customers">Customers <span class="count">${n(sum.complete)}</span></a>
       <a href="#/customers?view=update">Update needed <span class="count">${n(sum.needing + sum.sales_without_customer)}</span></a>
+      <a href="#/customers?view=next">Next book</a>
       <a href="#/customers?view=feedback" aria-current="page">Feedback <span class="count">${n(f.answered)}</span></a></nav>
     <div class="kpis"><div class="kpi"><span class="l">Answers</span><span class="v">${n(f.answered)}</span><span class="s">of ${n(f.sent)} links sent</span></div>
       <div class="kpi"><span class="l">Average rating</span><span class="v">${f.average === null ? '—' : esc(f.average.toFixed(1)) + ' ★'}</span></div></div>
@@ -262,4 +266,37 @@ async function renderFeedback(page) {
     ], f.rows, { empty: 'No feedback yet', emptyHint: 'Send a feedback request from a customer\'s WhatsApp button, or from a follow-up list.' })}</section>`;
   // Bar widths are set here, not inline in the markup (the page's security policy blocks inline styles).
   page.querySelectorAll('i[data-w]').forEach(i => { i.style.width = i.dataset.w + '%'; });
+}
+
+/** Customers → Next book: for each step in Settings, the customers ready for the next book. */
+async function renderNextBook(page) {
+  const [d, sum] = await Promise.all([get('/api/customers/next-book'), get('/api/customers/update-summary')]);
+  const n = v => Number(v || 0).toLocaleString('en-IN');
+  const month = new Date().toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+  page.innerHTML = `<div class="page-head"><div><h1>Customers</h1><div class="sub">Customers ready for their next book.</div></div></div>
+    <nav class="tabs" aria-label="Customer lists"><a href="#/customers">Customers <span class="count">${n(sum.complete)}</span></a>
+      <a href="#/customers?view=update">Update needed <span class="count">${n(sum.needing + sum.sales_without_customer)}</span></a>
+      <a href="#/customers?view=next" aria-current="page">Next book</a>
+      <a href="#/customers?view=feedback">Feedback <span class="count">${n(sum.feedback)}</span></a></nav>
+    <p class="muted">Customers who have the first book but not the next one, and have bought nothing for ${d.months} month${d.months === 1 ? '' : 's'}. Someone already in an open follow-up list made for the same step is not counted again. ${isAdmin() ? 'The steps are set in Settings → General → Next book.' : ''}</p>
+    ${table([
+      { label: 'Step', cell: x => `<b>${esc(x.from.name)}</b> → <b>${esc(x.to.name)}</b>` },
+      { label: 'Ready', cls: 'num', cell: x => `<b>${n(x.ready)}</b>` },
+      { label: 'Actions', cls: 'cell-actions', cell: x => `<a class="btn small" href="#/customers?ready_for=${encodeURIComponent(x.key)}">See them</a>${canEdit('customers') && x.ready ? `<button class="btn small primary" type="button" data-list="${esc(x.key)}">Make a follow-up list</button>` : ''}` },
+    ], d.steps, { empty: 'No next-book steps yet', emptyHint: 'The Admin adds them in Settings → General → Next book.' })}`;
+  page.addEventListener('click', e => {
+    const b = e.target.closest('[data-list]'); if (!b) return;
+    const x = d.steps.find(y => y.key === b.dataset.list);
+    drawer({
+      title: 'Make a follow-up list',
+      body: html`<p><strong>${n(x.ready)}</strong> customers have ${x.from.name} but not ${x.to.name}.</p>
+        <form id="nl-form" novalidate><div class="field"><label for="nl-name">List name *</label><input id="nl-name" name="name" required maxlength="120" value="Ready for ${x.to.name} — ${month}"></div>
+        <div class="field"><label for="nl-note">Note for the team</label><textarea id="nl-note" name="note" rows="3" maxlength="500">Offer ${x.to.name}; they bought ${x.from.name}.</textarea></div></form>`,
+      foot: '<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="nl-form">Save list</button>',
+      onMount: (dd, close) => onSubmit(dd.querySelector('#nl-form'), async v => {
+        const r = await api('POST', '/api/followups', { name: v.name, note: v.note, filters: { ready_for: x.key } });
+        close(); toast(`List saved with ${r.total.toLocaleString('en-IN')} customers`); location.hash = `#/followups/${r.id}`;
+      }),
+    });
+  });
 }

@@ -2,7 +2,7 @@
 const { CHANNEL_OF } = require('../auth');
 const { audit, history } = require('../audit');
 const { moveStock, saleStock } = require('../stock');
-const { getLists } = require('../settings');
+const { getLists, getShipping } = require('../settings');
 const { phoneKey } = require('./customers');
 const { bad, notFound, forbidden, unprocessable, str, money, date, oneOf, idParam, isValidDate, today, inr } = require('../util');
 
@@ -38,7 +38,8 @@ module.exports = (app, { db, perm }) => {
   }
 
   async function load(id) {
-    const sale = await db.get(`SELECT s.*, (s.total_amount - s.amount_received) AS balance, u.name AS salesperson_name, cb.name AS created_by_name, c.code AS customer_code
+    const sale = await db.get(`SELECT s.*, (s.total_amount - s.amount_received) AS balance, u.name AS salesperson_name, cb.name AS created_by_name, c.code AS customer_code,
+        c.pin AS customer_pin, c.location AS customer_district, c.state AS customer_state, c.address AS customer_address
       FROM sales s JOIN users u ON u.id = s.salesperson_id JOIN users cb ON cb.id = s.created_by
       LEFT JOIN customers c ON c.id = s.customer_id WHERE s.id = ?`, [id]);
     if (!sale) return null;
@@ -117,10 +118,38 @@ module.exports = (app, { db, perm }) => {
     res.status(201).json(await load(id));
   });
 
+  /** Courier and tracking number from a request; both optional (a label can be printed with a blank box). */
+  async function shippingFrom(b) {
+    const couriers = (await getShipping(db)).couriers.map(c => c.name);
+    const courier = b.courier ? oneOf(String(b.courier), couriers, { name: 'Courier' }) : null;
+    const tracking = str(b.tracking_no, { name: 'Tracking number', max: 40 }) || null;
+    if (tracking && !/^[A-Za-z0-9-]+$/.test(tracking)) throw bad('The tracking number can have only letters, digits and dashes', { field: 'Tracking number' });
+    return { courier, tracking: tracking ? tracking.toUpperCase() : null };
+  }
+
+  // ── Courier, tracking number and gift pack, before the label is printed ─
+  app.patch('/api/sales/:id/shipping', perm('dispatch'), async (req, res) => {
+    const id = idParam(req.params.id);
+    const s = await db.get('SELECT id, status, channel, import_ref, courier, tracking_no, gift_pack FROM sales WHERE id = ?', [id]);
+    if (!s) throw notFound('Sale');
+    assertCanSee(req.user, s);
+    if (s.import_ref) throw unprocessable('This order was brought in from the old order sheet and is kept as history');
+    if (s.status === 'Cancelled') throw unprocessable('This order is cancelled');
+    const { courier, tracking } = await shippingFrom(req.body);
+    const gift = req.body.gift_pack === undefined ? s.gift_pack : (req.body.gift_pack === true || req.body.gift_pack === 1 ? 1 : 0);
+    await db.tx(async t => {
+      await t.run('UPDATE sales SET courier = ?, tracking_no = ?, gift_pack = ?, updated_at = now_iso() WHERE id = ?', [courier, tracking, gift, id]);
+      await audit(t, req.user, 'sale', id, 'shipping_changed', { courier: s.courier, tracking_no: s.tracking_no, gift_pack: s.gift_pack }, { courier, tracking_no: tracking, gift_pack: gift });
+    });
+    res.json(await load(id));
+  });
+
   // ── Move an order through packing and dispatch ───────────────────────────
   app.post('/api/sales/:id/status', perm('dispatch'), async (req, res) => {
     const to = oneOf(req.body.status, FLOW, { required: true, name: 'Status' });
     const id = idParam(req.params.id);
+    // Marking Dispatched can carry the courier and tracking number (kept if already there).
+    const ship = to === 'Dispatched' && (req.body.courier || req.body.tracking_no) ? await shippingFrom(req.body) : null;
     await db.tx(async t => {
       const s = await t.get('SELECT * FROM sales WHERE id = ? FOR UPDATE', [id]);
       if (!s) throw notFound('Sale');
@@ -134,6 +163,7 @@ module.exports = (app, { db, perm }) => {
       const claimed = await t.run('UPDATE sales SET status = ?, updated_at = now_iso() WHERE id = ? AND status = ?', [to, id, s.status]);
       if (!claimed.rowCount) return;
       await audit(t, req.user, 'sale', id, 'status_changed', { status: s.status }, { status: to });
+      if (ship) await t.run('UPDATE sales SET courier = COALESCE(?, courier), tracking_no = COALESCE(?, tracking_no) WHERE id = ?', [ship.courier, ship.tracking, id]);
       if (target >= DISPATCHED && from < DISPATCHED) {
         // Rule: physical stock is deducted on dispatch (and the reservation is used up).
         const items = await saleStock(t, id);

@@ -649,3 +649,15 @@ ul.plain li { padding: 3px 0; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; }
 @media (max-width: 900px) { .grid-3 { grid-template-columns: 1fr; } }
 .grid-3 > .panel + .panel { margin-top: 0; }
+
+/* ---------- Order messages, shipping, next-book steps ---------- */
+.wa-preview { background: #E7F7DC; border: 1px solid #CDE8BA; border-radius: 10px; padding: 10px 12px; white-space: pre-wrap; font-size: 14px; line-height: 1.45; }
+.field > .label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+.ship-edit { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 4px 0 14px; background: var(--paper); }
+.ship-edit summary { cursor: pointer; font-weight: 600; }
+.ship-edit form { margin-top: 10px; align-items: end; }
+.ship-edit .check { margin-bottom: 8px; }
+.gift-f { margin: 4px 0 12px; }
+.nb-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.nb-row select { flex: 1; min-width: 0; }
+@media (max-width: 760px) { .ship-edit .grid3 { grid-template-columns: 1fr; } }

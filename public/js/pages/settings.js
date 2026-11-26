@@ -1,5 +1,5 @@
 // Settings (Admin): theme, discounts, charges, and the choices offered in the app's dropdown lists.
-import { api, esc, html, raw, onSubmit, toast, state, applyTheme } from '../core.js';
+import { api, esc, html, raw, onSubmit, toast, state, applyTheme, options } from '../core.js';
 import * as users from './users.js';
 import * as accessPage from './access.js';
 
@@ -46,12 +46,22 @@ async function renderGeneral(page) {
       <form id="f-disc" novalidate><div class="table-wrap"><table class="responsive"><thead><tr><th scope="col">Set</th>${raw(chans.map(([, l]) => `<th scope="col" class="num">${esc(l)} (%)</th>`).join(''))}</tr></thead>
         <tbody>${raw(groups.map(([g, gl]) => `<tr><td data-label="Set"><div>${esc(gl)}</div></td>${chans.map(([c, cl]) => `<td class="num" data-label="${esc(cl)}"><div><input class="pct" name="${g}:${c}" type="number" inputmode="decimal" min="0" max="90" step="0.5" aria-label="${esc(gl)}, ${esc(cl)}" value="${d[g] ? d[g][c] : ''}"></div></td>`).join('')}</tr>`).join(''))}</tbody></table></div>
         <button class="btn primary top-gap" type="submit">Save discounts</button></form></section>
-    <section class="panel"><h2>Customer messages</h2><p class="muted">The WhatsApp messages the team sends from Customers and Follow-up lists. In a message, these are filled in for each customer: {name} their first name, {link} their own feedback link, {review_link}, {website}, {coupon}, {product} and {price} (the book chosen, at the WhatsApp price), {academy_text}, {academy_link}.</p>
+    <section class="panel"><h2>Customer messages</h2><p class="muted">The WhatsApp messages the team sends from Customers and Follow-up lists. In a message, these are filled in for each customer: {name} their first name, {link} their own feedback link, {review_link}, {website}, {coupon}, {product} and {price} (the book chosen, at the WhatsApp price), {academy_text}, {academy_link}. In the order messages also {order_no}, {date}, {items}, {charges}, {total}, {payment} (how to pay, from the UPI ID), {courier}, {tracking}, {tracking_link}.</p>
       <form id="f-msg" novalidate>
         <div class="grid2">${raw((state.messageFields || []).map(([k, l]) => `<div class="field${k === 'academy_text' ? ' span2' : ''}"><label for="m-${k}">${esc(l)}</label>${k === 'academy_text' ? `<textarea id="m-${k}" name="${k}" rows="2" maxlength="600">${esc(state.messages[k] || '')}</textarea>` : `<input id="m-${k}" name="${k}" maxlength="600" value="${esc(state.messages[k] || '')}" ${k.endsWith('_url') ? 'type="url" placeholder="https://…"' : ''}>`}
           ${k === 'coupon' ? '<div class="hint">Sent once a customer shows their website review. For example: THANKYOU10 (10% off your next order on the website).</div>' : k === 'review_url' ? '<div class="hint">Where customers write a review. Empty: the website address is used.</div>' : ''}</div>`).join(''))}</div>
-        ${raw((state.messageKinds || []).map(([k, l, h]) => `<div class="field"><label for="mt-${k}">${esc(l)}</label><textarea id="mt-${k}" name="t:${k}" rows="3" maxlength="1000">${esc(state.messages.templates[k] || '')}</textarea><div class="hint">${esc(h)}</div></div>`).join(''))}
+        ${raw([...(state.messageKinds || []), ...(state.orderKinds || [])].map(([k, l, h]) => `<div class="field"><label for="mt-${k}">${esc(l)}</label><textarea id="mt-${k}" name="t:${k}" rows="3" maxlength="1000">${esc(state.messages.templates[k] || '')}</textarea><div class="hint">${esc(h)}</div></div>`).join(''))}
         <button class="btn primary" type="submit">Save customer messages</button></form></section>
+    <section class="panel"><h2>Labels and bills</h2><p class="muted">Printed on every address label and bill.</p>
+      <form id="f-ship" novalidate><div class="grid2">${raw((state.shippingFields || []).map(([k, l]) => `<div class="field${k === 'from_address' ? ' span2' : ''}"><label for="sh-${k}">${esc(l)}</label><input id="sh-${k}" name="${k}" maxlength="300" value="${esc(state.shipping[k] || '')}"></div>`).join(''))}</div>
+        <div class="field"><label for="sh-cour">Couriers, one per line: name | tracking page</label><textarea id="sh-cour" name="couriers" rows="3">${esc(state.shipping.couriers.map(c => `${c.name} | ${c.url}`).join('\n'))}</textarea>
+          <div class="hint">The tracking page is sent in the Dispatched message.</div></div>
+        <button class="btn primary" type="submit">Save label details</button></form></section>
+    <section class="panel"><h2>Next book</h2><p class="muted">Customers → Next book lists customers who have the first book of a step but not the next one, and have bought nothing for the waiting time.</p>
+      <form id="f-next" novalidate>
+        <div class="field"><label for="nb-m">Waiting time after their last purchase</label><select id="nb-m" name="months">${raw([1, 2, 3, 6].map(m => `<option value="${m}" ${m === state.nextBook.months ? 'selected' : ''}>${m} month${m === 1 ? '' : 's'}</option>`).join(''))}</select></div>
+        <div id="nb-steps"></div>
+        <div class="btn-row"><button class="btn small" type="button" id="nb-add">Add a step</button><button class="btn primary" type="submit">Save next-book steps</button></div></form></section>
     <section class="panel"><h2>Order charges and bulk orders</h2><p class="muted">The charges are added to a tele-sales order when ticked on the sale form. The bulk rule drives the "Bulk order customers" filter on the Customers page.</p>
       <form id="f-charges" novalidate><div class="grid2">${raw(AMOUNTS.map(([k, l, h]) => `<div class="field"><label for="a-${k}">${esc(l)}</label><input id="a-${k}" name="${k}" type="number" inputmode="numeric" min="0" step="1" value="${ch[k] ?? 0}"><div class="hint">${esc(h)}</div></div>`).join(''))}</div>
         <button class="btn primary" type="submit">Save charges and bulk rule</button></form></section>
@@ -66,6 +76,18 @@ async function renderGeneral(page) {
   onSubmit(page.querySelector('#f-disc'), async v => {
     const body = {}; for (const [k, val] of Object.entries(v)) { const [g, c] = k.split(':'); (body[g] = body[g] || {})[c] = val; }
     state.discounts = await api('PUT', '/api/settings/discounts', body); window.dispatchEvent(new Event('nm:changed')); toast('Discounts saved'); renderGeneral(page);
+  });
+  onSubmit(page.querySelector('#f-ship'), async v => { state.shipping = await api('PUT', '/api/settings/shipping', v); toast('Label details saved'); renderGeneral(page); });
+  // Next-book steps: a row per step, "first book → next book".
+  const books = state.books.filter(b => b.active && b.sku !== 'OTHER').map(b => [b.sku, b.name]);
+  const stepsBox = page.querySelector('#nb-steps');
+  const stepRow = ([a, b] = ['', '']) => `<div class="nb-row"><label class="sr-only">First book</label><select data-a>${options(books, a, 'Choose')}</select><span aria-hidden="true">→</span><label class="sr-only">Next book</label><select data-b>${options(books, b, 'Choose')}</select><button class="btn small" type="button" data-del aria-label="Remove this step">×</button></div>`;
+  stepsBox.innerHTML = state.nextBook.steps.map(stepRow).join('');
+  page.querySelector('#nb-add').addEventListener('click', () => stepsBox.insertAdjacentHTML('beforeend', stepRow()));
+  stepsBox.addEventListener('click', e => { if (e.target.closest('[data-del]')) e.target.closest('.nb-row').remove(); });
+  onSubmit(page.querySelector('#f-next'), async v => {
+    const steps = [...stepsBox.querySelectorAll('.nb-row')].map(r => [r.querySelector('[data-a]').value, r.querySelector('[data-b]').value]).filter(([a, b]) => a || b);
+    state.nextBook = await api('PUT', '/api/settings/next-book', { months: Number(v.months), steps }); toast('Next-book steps saved'); renderGeneral(page);
   });
   onSubmit(page.querySelector('#f-msg'), async v => {
     const body = { templates: {} };

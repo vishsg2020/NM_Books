@@ -1,6 +1,6 @@
 'use strict';
 const { audit } = require('../audit');
-const { getLists, getCharges, read, write } = require('../settings');
+const { getLists, getCharges, getNextBook, read, write } = require('../settings');
 const { bad, notFound, conflict, str, oneOf, idParam, normPhone, today } = require('../util');
 
 const TYPES = ['Individual', 'School', 'Bookstore', 'Other'];
@@ -134,7 +134,14 @@ module.exports = (app, { db, perm, requireAdmin }) => {
   const idList = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 10).map(idParam);
 
   /** The customer list query for the given filters (shared by the list and the Google Contacts download). */
-  function customerQuery(q, charges, lists) {
+  /** Everything customerQuery needs besides the filters. */
+  async function queryArgs() {
+    const nb = await getNextBook(db);
+    const ids = new Map((await db.all('SELECT id, lower(sku) AS sku, name FROM books')).map(b => [b.sku, b]));
+    const steps = nb.steps.map(([a, b]) => ({ key: `${a}>${b}`, from: ids.get(a.toLowerCase()), to: ids.get(b.toLowerCase()) })).filter(s => s.from && s.to);
+    return [await getCharges(db), await getLists(db), { months: nb.months, steps }];
+  }
+  function customerQuery(q, charges, lists, next = { months: 1, steps: [] }) {
     const where = []; const p = {};
     if (q.source) { where.push('c.source = @source'); p.source = oneOf(q.source, SOURCES, { name: 'Added from' }); }
     // Bulk order customers: at least one order with many copies, or of a large amount (both set on the Settings page).
@@ -156,6 +163,17 @@ module.exports = (app, { db, perm, requireAdmin }) => {
     // Purchase filters (BA section 7): bought every one of these, and not bought any of those.
     idList(q.bought).forEach((id, n) => { p['b' + n] = id; where.push(BOUGHT('b' + n)); });
     idList(q.not_bought).forEach((id, n) => { p['n' + n] = id; where.push('NOT ' + BOUGHT('n' + n)); });
+    // Next book: has the first book of the step, not the next one, has bought nothing for the waiting time, and is not
+    // already in an open follow-up list made for this step.
+    let readyCut = null;
+    if (q.ready_for) {
+      const step = next.steps.find(s => s.key === String(q.ready_for));
+      if (!step) throw bad('That next-book step is not in Settings');
+      p.rf_from = step.from.id; p.rf_to = step.to.id; p.rf_tag = '%' + JSON.stringify({ ready_for: step.key }).slice(1, -1).replace(/[%_\\]/g, '\\$&') + '%';
+      where.push(BOUGHT('rf_from'), 'NOT ' + BOUGHT('rf_to'));
+      where.push(`NOT EXISTS (SELECT 1 FROM follow_up_members fm JOIN follow_up_lists fl ON fl.id = fm.list_id WHERE fm.customer_id = c.id AND fl.closed_at IS NULL AND fl.filters_json LIKE @rf_tag)`);
+      const d = new Date(today() + 'T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() - next.months); readyCut = d.toISOString().slice(0, 10);
+    }
     const outer = [];
     if (q.outstanding === '1') outer.push('outstanding_amount > 0');
     const ORDERS = { repeat: 'total_orders >= 2', once: 'total_orders = 1', twice: 'total_orders = 2', '3plus': 'total_orders >= 3', none: 'total_orders = 0' };
@@ -164,6 +182,7 @@ module.exports = (app, { db, perm, requireAdmin }) => {
     if (q.view === 'update') outer.push('cardinality(needs) > 0');
     else if (!q.q) outer.push('cardinality(needs) = 0');
     if (q.reason) { outer.push('@reason = ANY(needs)'); p.reason = oneOf(q.reason, REASONS, { name: 'Reason' }); }
+    if (readyCut) { outer.push('last_purchase_date <= @rf_cut'); p.rf_cut = readyCut; }
     // Not bought since: has ordered before, but nothing in the last 3, 6 or 12 months.
     if (q.not_since) {
       const months = Number(oneOf(String(q.not_since), Object.keys(NOT_SINCE), { name: 'Not bought since' }));
@@ -177,7 +196,7 @@ module.exports = (app, { db, perm, requireAdmin }) => {
   }
 
   app.get('/api/customers', perm('customers'), async (req, res) => {
-    const { sql, p } = customerQuery(req.query, await getCharges(db), await getLists(db));
+    const { sql, p } = customerQuery(req.query, ...(await queryArgs()));
     const rows = await db.all(`${sql} LIMIT 501`, p);
     const { n } = await db.get(`SELECT COUNT(*) AS n FROM (${sql}) y`, p);
     res.json({ rows: rows.slice(0, 500), truncated: rows.length > 500, total: n });
@@ -186,7 +205,7 @@ module.exports = (app, { db, perm, requireAdmin }) => {
   // The filtered customers as a file that Google Contacts can import (contacts.google.com → Import).
   // Admin and Manager only: it is the whole contact list in one download. Every download is logged.
   app.get('/api/customers/google-contacts.csv', perm('customers', { wide: true }), async (req, res) => {
-    const { sql, p } = customerQuery(req.query, await getCharges(db), await getLists(db));
+    const { sql, p } = customerQuery(req.query, ...(await queryArgs()));
     const rows = (await db.all(sql, p)).filter(c => c.phone_norm);
     const label = str(req.query.label, { name: 'Label', max: 60 }) || 'Nalla Malayalam Customers';
     // Quote every cell; a cell that a spreadsheet could read as a formula gets a leading apostrophe.
@@ -256,6 +275,16 @@ module.exports = (app, { db, perm, requireAdmin }) => {
     res.json(r);
   });
 
+  // Customers → Next book: how many customers are ready for each step.
+  app.get('/api/customers/next-book', perm('customers'), async (_req, res) => {
+    const args = await queryArgs(); const out = [];
+    for (const s of args[2].steps) {
+      const { sql, p } = customerQuery({ ready_for: s.key }, ...args);
+      out.push({ key: s.key, from: { id: s.from.id, name: s.from.name }, to: { id: s.to.id, name: s.to.name }, ready: (await db.get(`SELECT COUNT(*) AS n FROM (${sql}) y`, p)).n });
+    }
+    res.json({ months: args[2].months, steps: out });
+  });
+
   // Profile with the full purchase and payment history.
   app.get('/api/customers/:id', perm('customers'), async (req, res) => {
     const c = await db.get(`SELECT c.*, ${STATS}, ${needsSql((await getLists(db)).places)} AS needs FROM customers c WHERE c.id = ?`, [idParam(req.params.id)]);
@@ -321,7 +350,7 @@ module.exports = (app, { db, perm, requireAdmin }) => {
     res.json(await db.get(`SELECT c.*, ${STATS} FROM customers c WHERE c.id = ?`, [before.id]));
   });
 
-  require('./followups')(app, { db, perm, customerQuery, getCharges, getLists });
+  require('./followups')(app, { db, perm, customerQuery, queryArgs });
 };
 module.exports.findOrCreateCustomer = findOrCreateCustomer;
 module.exports.SORTS = SORTS;
