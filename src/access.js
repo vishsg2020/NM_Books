@@ -29,16 +29,17 @@ const AREAS = [
   { key: 'profit', name: 'Costs & profit', note: 'costs per book, profit (hidden from the menu now)' },
   { key: 'reports', name: 'Reports', note: 'dashboard trends, tele-sales report, dispatch report — to read' },
   { key: 'insights', name: 'Insights', note: 'where, when and how customers buy; best time to call' },
+  { key: 'prices', name: 'Prices & links', note: 'prices on every platform, offers and coupons, links to share' },
 ];
 // Today's access (before roles could be changed), plus the Report Viewer; Insights (27 Nov 2026) for Manager, Tele-sales
 // and Report Viewer. Admin always has everything.
 const DEFAULTS = {
-  manager: { dashboard: 'view', sales: 'edit', dispatch: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view', insights: 'view' },
-  telesales: { dashboard: 'view', sales: 'edit', customers: 'edit', calls: 'edit', books: 'view', insights: 'view' },
-  online: { dashboard: 'view', sales: 'edit', customers: 'edit', webimport: 'edit', books: 'view' },
-  onsite: { dashboard: 'view', sales: 'edit', customers: 'edit', visits: 'edit', books: 'view' },
+  manager: { dashboard: 'view', sales: 'edit', dispatch: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view', insights: 'view', prices: 'view' },
+  telesales: { dashboard: 'view', sales: 'edit', customers: 'edit', calls: 'edit', books: 'view', insights: 'view', prices: 'view' },
+  online: { dashboard: 'view', sales: 'edit', customers: 'edit', webimport: 'edit', books: 'view', prices: 'view' },
+  onsite: { dashboard: 'view', sales: 'edit', customers: 'edit', visits: 'edit', books: 'view', prices: 'view' },
   dispatch: { dashboard: 'view', sales: 'view', dispatch: 'edit', books: 'view' },
-  viewer: { dashboard: 'view', reports: 'view', insights: 'view' },
+  viewer: { dashboard: 'view', reports: 'view', insights: 'view', prices: 'view' },
 };
 const EDITABLE = ['manager', 'telesales', 'online', 'onsite', 'dispatch', 'viewer'];
 

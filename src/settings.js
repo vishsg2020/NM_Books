@@ -203,7 +203,7 @@ function cleanShipping(body) {
 }
 
 // ---------- Next book: which book comes after which (Customers → Next book) ----------
-const DEFAULT_NEXT_BOOK = { months: 1, steps: [['NM-P1', 'NM-P2'], ['NM-COMBO', 'KVS1'], ['KVS1', 'KVS2'], ['KVS2', 'KVS3'], ['KVS-COMBO', 'KVS3']] };
+const DEFAULT_NEXT_BOOK = { months: 1, steps: [['NMP1OCT2026', 'NMP2OCT2026'], ['NMCOMBOOCT2026', 'KVS1BUNDLEOCT2026'], ['KVS1BUNDLEOCT2026', 'KVS2BUNDLEOCT2026'], ['KVS2BUNDLEOCT2026', 'KVS3BUNDLENOV2026'], ['KVS12BUNDLEOCT2026', 'KVS3BUNDLENOV2026']] };
 async function getNextBook(db) {
   const saved = (await read(db, 'next_book')) || {};
   return {

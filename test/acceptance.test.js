@@ -919,7 +919,7 @@ test('roles & access: the Manager cannot reach users, roles or settings', async 
   // and keeps everything else it had
   for (const url of ['/api/sales', '/api/customers', '/api/calls', '/api/visits', '/api/inventory/movements', '/api/profit', '/api/dashboard/trends', '/api/users/salespeople']) assert.equal((await M.get(url)).status, 200, url);
   const me = (await M.get('/api/me')).data.user.perms;
-  assert.deepEqual(me, { dashboard: 'view', sales: 'edit', dispatch: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view', insights: 'view' });
+  assert.deepEqual(me, { dashboard: 'view', sales: 'edit', dispatch: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view', insights: 'view', prices: 'view' });
 });
 
 test('roles & access: the Admin changes the grid, it applies at once, View and Edit are kept apart; Reset to defaults', async () => {
@@ -1137,4 +1137,38 @@ test('insights: where, when and how customers buy; who can see it', async () => 
   // who: Manager, Tele-sales and Report Viewer; not Dispatch, Online or Onsite
   for (const c of [D, O, S]) assert.equal((await c.get('/api/insights')).status, 403);
   assert.equal((await T.get('/api/me')).data.user.perms.insights, 'view');
+});
+
+test('Book Master: Malayalam title, author and links; Prices & links: coupons with validity and links to share', async () => {
+  assert.equal((await A.post('/api/books', { sku: 'ML-1', name: 'Malayalam Title Book', name_ml: 'മലയാളം പുസ്തകം', author: 'Test Author', mrp: 100, price: 100, website_url: 'http://insecure.example' })).status, 400);
+  const b = ok(await A.post('/api/books', { sku: 'ML-1', name: 'Malayalam Title Book', name_ml: 'മലയാളം പുസ്തകം', author: 'Test Author', mrp: 100, price: 100, website_url: 'https://www.nallamalayalam.in/books/ml-1' }));
+  assert.equal(b.name_ml, 'മലയാളം പുസ്തകം'); assert.equal(b.author, 'Test Author'); assert.equal(b.amazon_url, null);
+  assert.ok((await T.get('/api/books?q=' + encodeURIComponent('മലയാളം'))).data.some(x => x.id === b.id));
+  assert.ok((await T.get('/api/books?q=test%20author')).data.some(x => x.id === b.id));
+  const e = ok(await A.patch(`/api/books/${b.id}`, { amazon_url: 'https://www.amazon.in/dp/X1' }), 200);
+  assert.equal(e.amazon_url, 'https://www.amazon.in/dp/X1'); assert.equal(e.name_ml, 'മലയാളം പുസ്തകം'); // untouched fields stay
+  // coupons: the Admin keeps the list
+  assert.equal((await M.post('/api/coupons', { code: 'X1', offer: 'x' })).status, 403);
+  assert.equal((await A.post('/api/coupons', { code: 'BAD CODE', offer: '10% off' })).status, 400);
+  assert.equal((await A.post('/api/coupons', { code: 'DATES', offer: '10% off', valid_from: '2026-12-10', valid_to: '2026-12-01' })).status, 400);
+  const run = ok(await A.post('/api/coupons', { code: 'thankyou10', offer: '10% off your next order', conditions: 'after a website review', valid_to: '2026-12-31' }));
+  assert.equal(run.code, 'THANKYOU10'); assert.equal(run.state, 'Running');
+  assert.equal((await A.post('/api/coupons', { code: 'ThankYou10', offer: 'again' })).status, 409);
+  ok(await A.post('/api/coupons', { code: 'ONAM100', offer: '₹100 off any bundle', valid_from: '2027-08-01', valid_to: '2027-09-15', works_on: 'Everywhere' }));
+  ok(await A.post('/api/coupons', { code: 'OLD5', offer: '5% off', valid_to: '2026-01-31' }));
+  let t = ok(await T.get('/api/pricelist'), 200);
+  assert.deepEqual(t.coupons.map(c => [c.code, c.state]).sort(), [['ONAM100', 'Upcoming'], ['THANKYOU10', 'Running']]); // ended ones are not offered
+  assert.equal((await A.get('/api/pricelist')).data.coupons.length, 3); // the Admin sees all
+  ok(await A.patch(`/api/coupons/${run.id}`, { active: false }), 200);
+  t = (await T.get('/api/pricelist')).data;
+  assert.ok(!t.coupons.some(c => c.code === 'THANKYOU10'));
+  // links
+  assert.equal(t.links.find(l => l.key === 'website').url, 'https://www.nallamalayalam.in');
+  assert.equal((await M.send('PUT', '/api/settings/links', { website: 'https://x.in' })).status, 403);
+  assert.equal((await A.send('PUT', '/api/settings/links', { youtube: 'youtube.com/x' })).status, 400);
+  ok(await A.send('PUT', '/api/settings/links', { website: 'https://www.nallamalayalam.in', youtube: 'https://www.youtube.com/@nallamalayalam', instagram: 'https://www.instagram.com/nallamalayalam/' }), 200);
+  assert.equal((await O.get('/api/pricelist')).data.links.find(l => l.key === 'youtube').url, 'https://www.youtube.com/@nallamalayalam');
+  // who: the sales teams and Report Viewer; not Dispatch
+  assert.equal((await D.get('/api/pricelist')).status, 403);
+  assert.equal((await S.get('/api/pricelist')).status, 200);
 });

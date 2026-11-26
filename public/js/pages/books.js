@@ -8,32 +8,47 @@ export async function render(page) {
   const all = await get('/api/books');
   const cats = [...new Set(all.map(b => b.category).filter(Boolean))].sort();
   const { query } = parseHash();
-  page.innerHTML = html`<div class="page-head"><div><h1>Book Master</h1><div class="sub">Every book, its price and its stock. Available = in store − reserved for orders.</div></div>
+  page.innerHTML = html`<div class="page-head"><div><h1>Book Master</h1><div class="sub">Books, and the bundles made from them, as on the website. Available = in store − reserved for orders.</div></div>
     ${raw(admin ? '<div class="actions"><button class="btn primary" type="button" id="add-b">Add book</button></div>' : '')}</div>
     <form class="filters" id="b-filters">
-      <div class="field grow"><label for="bf-q">Search</label><input id="bf-q" name="q" type="search" placeholder="Name or SKU" value="${query.q}"></div>
+      <div class="field grow"><label for="bf-q">Search</label><input id="bf-q" name="q" type="search" placeholder="Name, Malayalam title, author or SKU" value="${query.q}"></div>
       <div class="field"><label for="bf-c">Category / Series</label><select id="bf-c" name="category">${raw(options(cats, query.category, 'All'))}</select></div>
       <div class="field"><label for="bf-a">Status</label><select id="bf-a" name="active">${raw(options([['1', 'Active'], ['0', 'Inactive']], query.active, 'All'))}</select></div>
       <div class="field"><label for="bf-l">Stock</label><select id="bf-l" name="low">${raw(options([['1', 'At or below minimum']], query.low, 'All'))}</select></div>
       <button class="btn" type="button" data-clear>Clear filters</button>
     </form><p class="result-count" id="b-count"></p><div id="b-list"></div>`;
+  const ml = b => (b.name_ml ? `<span class="ml" lang="ml">${esc(b.name_ml)}</span>` : '');
+  const linksOf = b => [b.website_url ? `<a href="${esc(b.website_url)}" target="_blank" rel="noopener">Website</a>` : '', b.amazon_url ? `<a href="${esc(b.amazon_url)}" target="_blank" rel="noopener">Amazon</a>` : ''].filter(Boolean).join(' · ');
+  const actions = b => (stock && b.kind !== 'Pack' ? `<button class="btn small" type="button" data-stock="${b.id}">Stock</button>` : '') + (admin ? `<button class="btn small" type="button" data-edit="${b.id}">Edit</button>` : '') +
+    (b.kind !== 'Pack' && canView('stock') ? `<a class="btn small" href="#/inventory?book_id=${b.id}">History</a>` : '');
+  const prices = b => `${b.prices ? Object.entries(b.prices).map(([k, v]) => `<span class="sub">${esc(k === 'Tele-sales' ? 'WhatsApp' : k === 'Amazon' ? 'Amazon/Flipkart' : k)} ${esc(inr(v))}</span>`).join('') : ''}`;
   const list = page.querySelector('#b-list');
   let rows = []; let singles = all.filter(b => b.kind !== 'Pack');
   const load = async () => {
     rows = await get('/api/books' + qs(parseHash().query));
     page.querySelector('#b-count').textContent = `${rows.length} book${rows.length === 1 ? '' : 's'} · ${rows.reduce((s, b) => s + b.on_hand, 0)} copies in store`;
     singles = all.filter(b => b.kind !== 'Pack');
-    list.innerHTML = table([
-      { label: 'Book', cell: b => `${esc(b.name)}${b.kind === 'Pack' ? ' ' + pill('Set', 'blue').__raw : ''}<span class="sub">${esc(b.sku)}${b.category ? ' · ' + esc(b.category) : ''}</span>${b.contents ? `<span class="sub">Contains: ${esc(b.contents)}</span>` : ''}` },
-      { label: 'Price', cls: 'num', cell: b => `${esc(inr(b.price))}${b.mrp && b.mrp !== b.price ? `<span class="sub">MRP ${esc(inr(b.mrp))}</span>` : ''}${b.prices ? Object.entries(b.prices).map(([k, v]) => `<span class="sub">${esc(k === 'Tele-sales' ? 'WhatsApp' : k === 'Amazon' ? 'Amazon/Flipkart' : k)} ${esc(inr(v))}</span>`).join('') : ''}` },
-      { label: 'In store', cls: 'num', cell: b => (b.kind === 'Pack' ? '—' : String(b.on_hand)) },
-      { label: 'Reserved', cls: 'num', cell: b => (b.kind === 'Pack' ? '—' : String(b.reserved)) },
-      { label: 'Available', cls: 'num', cell: b => `<strong>${b.available}</strong><span class="sub">${b.kind === 'Pack' ? 'sets possible' : 'min ' + b.min_stock}</span>` },
+    const books = rows.filter(b => b.kind !== 'Pack'); const packs = rows.filter(b => b.kind === 'Pack');
+    page.querySelector('#b-count').textContent = `${books.length} book${books.length === 1 ? '' : 's'} and ${packs.length} bundle${packs.length === 1 ? '' : 's'} · ${rows.reduce((t, b) => t + b.on_hand, 0)} copies in store`;
+    const any = Object.keys(parseHash().query).length;
+    list.innerHTML = `<h2>Books</h2>` + table([
+      { label: 'Book', cell: b => `<b>${esc(b.name)}</b>${ml(b)}<span class="sub">${[b.author, b.category].filter(Boolean).map(esc).join(' · ')}</span>${linksOf(b) ? `<span class="sub">${linksOf(b)}</span>` : ''}` },
+      { label: 'SKU', cell: b => esc(b.sku) },
+      { label: 'Price', cls: 'num', cell: b => `${esc(inr(b.price))}${b.mrp && b.mrp !== b.price ? `<span class="sub">MRP ${esc(inr(b.mrp))}</span>` : ''}` },
+      { label: 'In store', cls: 'num', cell: b => String(b.on_hand) },
+      { label: 'Reserved', cls: 'num', cell: b => String(b.reserved) },
+      { label: 'Available', cls: 'num', cell: b => `<strong>${b.available}</strong><span class="sub">min ${b.min_stock}</span>` },
       { label: 'Status', cell: b => stockPill(b).__raw },
-      ...(admin || canView('stock') ? [{ label: 'Actions', cls: 'cell-actions', cell: b =>
-        (stock && b.kind !== 'Pack' ? `<button class="btn small" type="button" data-stock="${b.id}">Stock</button>` : '') + (admin ? `<button class="btn small" type="button" data-edit="${b.id}">Edit</button>` : '') +
-        (b.kind !== 'Pack' && canView('stock') ? `<a class="btn small" href="#/inventory?book_id=${b.id}">History</a>` : '') }] : []),
-    ], rows, { empty: all.length ? 'No books match these filters' : 'No books yet', emptyHint: all.length ? 'Clear the filters to see every book.' : (admin ? 'Add the first book to start recording stock and sales.' : 'The Admin adds books here.') });
+      ...(admin || canView('stock') ? [{ label: 'Actions', cls: 'cell-actions', cell: actions }] : []),
+    ], books, { empty: any ? 'No books match these filters' : 'No books yet', emptyHint: any ? 'Clear the filters to see every book.' : (admin ? 'Add the first book to start recording stock and sales.' : 'The Admin adds books here.') })
+    + `<h2 class="top-gap">Bundles</h2>` + table([
+      { label: 'Bundle', cell: b => `<b>${esc(b.name)}</b>${ml(b)}${b.contents ? `<span class="sub">Contains ${b.contents.split(', ').length} books: ${esc(b.contents)}</span>` : ''}${linksOf(b) ? `<span class="sub">${linksOf(b)}</span>` : ''}` },
+      { label: 'SKU', cell: b => esc(b.sku) },
+      { label: 'MRP and prices', cls: 'num', cell: b => `${esc(inr(b.mrp || b.price))}${prices(b)}` },
+      { label: 'Available', cls: 'num', cell: b => `<strong>${b.available}</strong><span class="sub">sets possible</span>` },
+      { label: 'Status', cell: b => stockPill(b).__raw },
+      ...(admin ? [{ label: 'Actions', cls: 'cell-actions', cell: actions }] : []),
+    ], packs, { empty: any ? 'No bundles match these filters' : 'No bundles yet' });
   };
   const changed = () => { window.dispatchEvent(new Event('nm:changed')); load(); };
   wireFilters(page.querySelector('#b-filters'), load);
@@ -56,7 +71,15 @@ function bookForm(b, after, singles) {
         <div class="field"><label for="b-sku">Book ID / SKU *</label><input id="b-sku" name="sku" required maxlength="40" value="${b?.sku}"></div>
         <div class="field"><label for="b-cat">Category / Series</label><input id="b-cat" name="category" maxlength="100" value="${b?.category}"></div>
       </div>
-      <div class="field"><label for="b-name">Book name *</label><input id="b-name" name="name" required maxlength="200" value="${b?.name}"></div>
+      <div class="field"><label for="b-name">Name (English) *</label><input id="b-name" name="name" required maxlength="200" value="${b?.name}"></div>
+      <div class="grid2">
+        <div class="field"><label for="b-ml">Malayalam title</label><input id="b-ml" name="name_ml" lang="ml" maxlength="200" value="${b?.name_ml}"></div>
+        <div class="field"><label for="b-au">Author</label><input id="b-au" name="author" maxlength="200" value="${b?.author}"></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label for="b-wu">Website link</label><input id="b-wu" name="website_url" type="url" maxlength="500" placeholder="https://www.nallamalayalam.in/books/…" value="${b?.website_url}"></div>
+        <div class="field"><label for="b-au2">Amazon link</label><input id="b-au2" name="amazon_url" type="url" maxlength="500" placeholder="https://www.amazon.in/…" value="${b?.amazon_url}"></div>
+      </div>
       <div class="grid2">
         <div class="field"><label for="b-mrp">MRP</label><div class="money"><span>₹</span><input id="b-mrp" name="mrp" type="number" inputmode="numeric" min="0" step="1" value="${b?.mrp}"></div></div>
         <div class="field"><label for="b-price">Selling price *</label><div class="money"><span>₹</span><input id="b-price" name="price" type="number" inputmode="numeric" min="0" step="1" required value="${b?.price}"></div></div>
