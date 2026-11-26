@@ -28,15 +28,17 @@ const AREAS = [
   { key: 'stock', name: 'Stock', note: 'stock movements, opening stock' },
   { key: 'profit', name: 'Costs & profit', note: 'costs per book, profit (hidden from the menu now)' },
   { key: 'reports', name: 'Reports', note: 'dashboard trends, tele-sales report, dispatch report — to read' },
+  { key: 'insights', name: 'Insights', note: 'where, when and how customers buy; best time to call' },
 ];
-// Today's access (before roles could be changed), plus the Report Viewer. Admin always has everything.
+// Today's access (before roles could be changed), plus the Report Viewer; Insights (27 Nov 2026) for Manager, Tele-sales
+// and Report Viewer. Admin always has everything.
 const DEFAULTS = {
-  manager: { dashboard: 'view', sales: 'edit', dispatch: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view' },
-  telesales: { dashboard: 'view', sales: 'edit', customers: 'edit', calls: 'edit', books: 'view' },
+  manager: { dashboard: 'view', sales: 'edit', dispatch: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view', insights: 'view' },
+  telesales: { dashboard: 'view', sales: 'edit', customers: 'edit', calls: 'edit', books: 'view', insights: 'view' },
   online: { dashboard: 'view', sales: 'edit', customers: 'edit', webimport: 'edit', books: 'view' },
   onsite: { dashboard: 'view', sales: 'edit', customers: 'edit', visits: 'edit', books: 'view' },
   dispatch: { dashboard: 'view', sales: 'view', dispatch: 'edit', books: 'view' },
-  viewer: { dashboard: 'view', reports: 'view' },
+  viewer: { dashboard: 'view', reports: 'view', insights: 'view' },
 };
 const EDITABLE = ['manager', 'telesales', 'online', 'onsite', 'dispatch', 'viewer'];
 

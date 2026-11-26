@@ -12,6 +12,7 @@ import * as books from './pages/books.js';
 import * as inventory from './pages/inventory.js';
 import * as users from './pages/users.js';
 import * as followups from './pages/followups.js';
+import * as insights from './pages/insights.js';
 
 const app = document.getElementById('app');
 // Each menu item shows when the role can view one of its areas (Settings → Roles & access). Settings is Admin only.
@@ -28,6 +29,7 @@ const NAV = [
   { group: 'Tele-sales', items: [
     { path: 'calls', label: 'Calls', area: 'calls' },
     { path: 'callreport', label: 'Tele-sales report', area: ['calls', 'reports'] },
+    { path: 'insights', label: 'Insights', area: 'insights' },
   ] },
   { group: 'Onsite', items: [
     { path: 'visits', label: 'Visits', area: 'visits' },
@@ -45,7 +47,7 @@ const showItem = i => (i.admin ? isAdmin() : canView(i.area)) && (!i.only || sta
 
 // The area each page belongs to. `edits`: the page has something to change, so View alone gets the view-only note.
 const PAGE_AREA = {
-  dashboard: { area: 'dashboard' }, sales: { area: 'sales', edits: true }, customers: { area: 'customers', edits: true }, customer: { area: 'customers', edits: true }, followups: { area: 'customers', edits: true },
+  dashboard: { area: 'dashboard' }, sales: { area: 'sales', edits: true }, customers: { area: 'customers', edits: true }, customer: { area: 'customers', edits: true }, followups: { area: 'customers', edits: true }, insights: { area: 'insights' },
   dispatch: { area: ['dispatch', 'reports'], edits: 'dispatch' }, webimport: { area: 'webimport', edits: true }, calls: { area: 'calls', edits: true },
   callreport: { area: ['calls', 'reports'] }, visits: { area: 'visits', edits: true }, books: { area: 'books', edits: true },
   inventory: { area: 'stock', edits: true }, profit: { area: 'profit', edits: true }, settings: { admin: true }, users: { admin: true },
@@ -57,6 +59,7 @@ const ROUTES = {
   customers: customers.renderList,
   customer: customers.renderProfile,
   followups: followups.render,
+  insights: insights.render,
   calls: calls.renderList,
   visits: visits.renderList,
   profit: profit.render,

@@ -919,7 +919,7 @@ test('roles & access: the Manager cannot reach users, roles or settings', async 
   // and keeps everything else it had
   for (const url of ['/api/sales', '/api/customers', '/api/calls', '/api/visits', '/api/inventory/movements', '/api/profit', '/api/dashboard/trends', '/api/users/salespeople']) assert.equal((await M.get(url)).status, 200, url);
   const me = (await M.get('/api/me')).data.user.perms;
-  assert.deepEqual(me, { dashboard: 'view', sales: 'edit', dispatch: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view' });
+  assert.deepEqual(me, { dashboard: 'view', sales: 'edit', dispatch: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view', insights: 'view' });
 });
 
 test('roles & access: the Admin changes the grid, it applies at once, View and Edit are kept apart; Reset to defaults', async () => {
@@ -1114,4 +1114,27 @@ test('next book: customers with the first book but not the next, after the waiti
   ok(await T.post(`/api/followups/${list.id}/close`), 200);
   assert.equal((await T.get('/api/customers/next-book')).data.steps[0].ready, 1);
   assert.equal((await D.get('/api/customers/next-book')).status, 403);
+});
+
+test('insights: where, when and how customers buy; who can see it', async () => {
+  const V = client(); await V.login('v@x.in').catch(() => null);
+  const d = ok(await T.get('/api/insights?range=all'), 200);
+  assert.equal(d.months.length, 12); assert.equal(d.weekdays.length, 7); assert.equal(d.come_back.buckets.length, 7);
+  assert.ok(d.orders > 0 && d.customers > 0);
+  const kannur = d.where.find(w => w.place === 'Kannur');
+  assert.ok(kannur && kannur.district && kannur.customers >= 1 && kannur.orders >= kannur.customers);
+  assert.ok(d.where.every(w => w.repeat_pct >= 0 && w.repeat_pct <= 100 && w.cod_pct >= 0 && w.cod_pct <= 100));
+  assert.equal(d.districts.length, 14);
+  // too few calls: no grid, no "best time"
+  assert.equal(d.calls.enough, false); assert.equal(d.calls.grid, null); assert.equal(d.calls.best, null); assert.equal(d.calls.needed, 200);
+  assert.ok(d.how.some(h => /Paid by/.test(h.label)));
+  // the filters
+  const tele = ok(await M.get('/api/insights?range=all&channel=Tele-sales'), 200);
+  assert.ok(tele.orders <= d.orders);
+  const one = ok(await M.get(`/api/insights?range=all&book_id=${maam.id}`), 200);
+  assert.ok(one.orders <= d.orders);
+  assert.equal((await M.get('/api/insights?range=5y')).status, 400);
+  // who: Manager, Tele-sales and Report Viewer; not Dispatch, Online or Onsite
+  for (const c of [D, O, S]) assert.equal((await c.get('/api/insights')).status, 403);
+  assert.equal((await T.get('/api/me')).data.user.perms.insights, 'view');
 });
