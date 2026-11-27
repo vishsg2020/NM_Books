@@ -90,7 +90,7 @@ async function mergeCustomers(t, keepId, otherId, user, reason) {
     source: a.created_at <= b.created_at ? a.source : b.source, created_at: a.created_at <= b.created_at ? a.created_at : b.created_at,
   };
   const moved = {};
-  for (const table of ['sales', 'calls', 'visits', 'customer_messages', 'feedback']) moved[table] = (await t.run(`UPDATE ${table} SET customer_id = ? WHERE customer_id = ?`, [a.id, b.id])).rowCount;
+  for (const table of ['sales', 'calls', 'visits', 'customer_messages', 'feedback', 'website_reviews']) moved[table] = (await t.run(`UPDATE ${table} SET customer_id = ? WHERE customer_id = ?`, [a.id, b.id])).rowCount;
   // Follow-up lists: a list holding both keeps the kept record's row; the other's rows move across.
   await t.run('DELETE FROM follow_up_members m WHERE m.customer_id = ? AND EXISTS (SELECT 1 FROM follow_up_members k WHERE k.list_id = m.list_id AND k.customer_id = ?)', [b.id, a.id]);
   await t.run('UPDATE follow_up_members SET customer_id = ? WHERE customer_id = ?', [a.id, b.id]);
@@ -273,7 +273,7 @@ module.exports = (app, { db, perm, requireAdmin, access }) => {
         CASE WHEN s.import_ref LIKE 'WEB-%' THEN 'Website' WHEN s.import_ref LIKE 'WA-%' THEN 'WhatsApp group' WHEN s.import_ref IS NOT NULL THEN 'Order sheet' ELSE 'Sales' END AS source
       FROM sales s WHERE s.customer_id IS NULL AND s.status <> 'Cancelled' AND s.channel <> 'Onsite' ${mineS} ORDER BY s.sale_date DESC, s.id DESC LIMIT 500`, p);
     const { m } = await db.get(`SELECT COUNT(*) AS m FROM sales s WHERE s.customer_id IS NULL AND s.status <> 'Cancelled' AND s.channel <> 'Onsite' ${mineS}`, p);
-    res.json({ feedback: (await db.get('SELECT COUNT(*) AS n FROM feedback WHERE submitted_at IS NOT NULL')).n, needing: n, complete: total.n - n, reasons: Object.fromEntries(REASONS.map(r => [r, (counts.find(c => c.reason === r) || {}).n || 0])), sales_without_customer: m, sales: noCustomer });
+    res.json({ feedback: (await db.get('SELECT COUNT(*) AS n FROM feedback WHERE submitted_at IS NOT NULL')).n, reviews_waiting: (await db.get(`SELECT COUNT(*) AS n FROM website_reviews WHERE status = 'waiting'`)).n, needing: n, complete: total.n - n, reasons: Object.fromEntries(REASONS.map(r => [r, (counts.find(c => c.reason === r) || {}).n || 0])), sales_without_customer: m, sales: noCustomer });
   });
 
   // Possibly the same person twice: same name (letters only) and the same PIN. Pairs marked "not the same person" are left out.

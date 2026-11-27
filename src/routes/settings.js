@@ -14,7 +14,7 @@ module.exports = (app, { db, perm, requireAdmin }) => {
       discounts: await P.getDiscounts(db), discount_groups: P.GROUPS, discount_channels: P.CHANNELS, theme: await getTheme(db), themes: THEMES,
       messages: await S.getMessages(db), message_kinds: S.MESSAGE_KINDS, message_fields: S.MESSAGE_FIELDS, order_kinds: S.ORDER_KINDS,
       shipping: await S.getShipping(db), shipping_fields: S.SHIPPING_FIELDS, next_book: await S.getNextBook(db),
-      delivery_check: await require('./delivery').getConfig(db) });
+      delivery_check: await require('./delivery').getConfig(db), feedback_page: await S.getFeedbackPage(db), feedback_styles: S.FEEDBACK_STYLES });
   });
 
   app.put('/api/settings/shipping', requireAdmin, async (req, res) => {
@@ -32,6 +32,11 @@ module.exports = (app, { db, perm, requireAdmin }) => {
     const before = await S.getMessages(db); const next = S.cleanMessages(req.body);
     await db.tx(async t => { await S.write(t, 'messages', next); await audit(t, req.user, 'settings', null, 'messages_changed', before, next); });
     res.json(await S.getMessages(db));
+  });
+  app.put('/api/settings/feedback-page', requireAdmin, async (req, res) => {
+    const before = await S.getFeedbackPage(db); const next = S.cleanFeedbackPage(req.body);
+    await db.tx(async t => { await S.write(t, 'feedback_page', next); await audit(t, req.user, 'settings', null, 'feedback_page_changed', before, next); });
+    res.json(await S.getFeedbackPage(db));
   });
   app.put('/api/settings/discounts', requireAdmin, async (req, res) => {
     const before = await P.getDiscounts(db); const next = P.cleanDiscounts(req.body);

@@ -10,31 +10,40 @@ const firstName = c => {
 };
 const whatsappPrice = b => (b.prices && b.prices['Tele-sales'] != null ? b.prices['Tele-sales'] : b.price);
 
+const GROUPS = [['Ask', ['feedback', 'review']], ['Offer', ['coupon', 'new_product', 'academy']], ['Other', ['share', 'custom']]];
+const SHORT = { feedback: 'Feedback', review: 'Website review', coupon: 'Coupon', new_product: 'New book or set', academy: 'Language Academy', share: 'Share with friends', custom: 'Own message' };
+const daysAgo = iso => { const d = Math.floor((Date.now() - Date.parse(iso)) / 864e5); return d <= 0 ? 'today' : d === 1 ? 'yesterday' : `${d} days ago`; };
+
 /**
- * customers: [{ id, name, phone, type }]. opts: { listId, kind, after } — after() runs when the drawer closes,
- * if any chat was opened.
+ * customers: [{ id, name, phone, type }]. opts: { listId, kind, after, title } — after() runs when the drawer closes,
+ * if any chat was opened. Several customers are sent one by one: open WhatsApp, press Send there, come back, and the
+ * next customer is ready. Anyone sent the same kind of message in the last 30 days is flagged.
  */
 export function whatsappDrawer(customers, opts = {}) {
   customers = customers.filter(c => waLink(c.phone));
   if (!customers.length) { toast('No customer here has a number WhatsApp can use', 'error'); return; }
-  const m = state.messages; const kinds = state.messageKinds;
+  const m = state.messages; const kinds = Object.fromEntries((state.messageKinds || []).map(([k, l, h]) => [k, [l, h]]));
   const books = state.books.filter(b => b.active && b.sku !== 'OTHER');
   const record = canEdit('customers');
-  let kind = opts.kind || 'feedback'; let links = {}; let sent = 0;
+  const many = customers.length > 1;
+  let kind = opts.kind || 'feedback'; let links = {}; let sent = 0; let recent = {};
+  const done = new Map(); // customer id → 'opened' | 'skipped'
+  let at = 0;             // the customer whose turn it is
   drawer({
     wide: true,
-    title: customers.length === 1 ? `WhatsApp ${customers[0].name}` : `WhatsApp ${customers.length} customers, one by one`,
-    body: html`<div class="msg-types" role="radiogroup" aria-label="Message">${raw(kinds.map(([k, l, h]) => `<label class="msg-type"><input type="radio" name="wa-kind" value="${k}" ${k === kind ? 'checked' : ''}><span><b>${esc(l)}</b><small>${esc(h)}</small></span></label>`).join(''))}</div>
+    title: opts.title || (many ? `WhatsApp ${customers.length} customers, one by one` : `WhatsApp ${customers[0].name}`),
+    body: html`<fieldset class="wa-kinds"><legend class="sr-only">Message</legend>${raw(GROUPS.map(([g, ks]) => `<div class="wa-group"><span class="wa-g">${g}</span>${ks.filter(k => kinds[k]).map(k => `<label class="wa-chip" title="${esc(kinds[k][1])}"><input type="radio" name="wa-kind" value="${k}" ${k === kind ? 'checked' : ''}><span>${esc(SHORT[k] || kinds[k][0])}</span></label>`).join('')}</div>`).join(''))}</fieldset>
       <div class="field hidden" id="wa-book-f"><label for="wa-book">Book or set</label><select id="wa-book">${raw(options(books.map(b => [b.id, `${b.name} · ₹${whatsappPrice(b)}`]), books[0]?.id))}</select></div>
       <div id="wa-warn"></div>
-      <div class="field"><label for="wa-text">Message</label><textarea id="wa-text" rows="6" maxlength="1000"></textarea>
+      <div class="wa-cols"><div class="field"><label for="wa-text">Message <span class="muted small">— change it for this time only</span></label><textarea id="wa-text" rows="7" maxlength="1000"></textarea>
         <div class="hint" id="wa-hint"></div></div>
-      <div id="wa-list"></div>
+        <div><span class="label" id="wa-pv-l">How it will look</span><div class="wa-preview" aria-labelledby="wa-pv-l"><div class="wa-to" id="wa-to"></div><div class="wa-bubble" id="wa-bubble"></div></div></div></div>
+      <div id="wa-queue"></div>
       <p class="muted small">${raw(record ? 'Opening a chat is noted on the customer, and in their follow-up lists. You press Send in WhatsApp.' : 'You press Send in WhatsApp.')}</p>`,
     foot: '<button class="btn" type="button" data-close>Close</button>',
     onClose: () => { if (sent && opts.after) opts.after(); },
     onMount: d => {
-      const ta = d.querySelector('#wa-text'); const list = d.querySelector('#wa-list'); const opened = new Set();
+      const ta = d.querySelector('#wa-text'); const q = d.querySelector('#wa-queue');
       const book = () => books.find(b => String(b.id) === d.querySelector('#wa-book').value);
       const fill = c => {
         const b = book();
@@ -42,22 +51,45 @@ export function whatsappDrawer(customers, opts = {}) {
           coupon: m.coupon || '(coupon)', academy_text: m.academy_text, academy_link: m.academy_url, product: b ? b.name : '', price: b ? whatsappPrice(b) : '' };
         return ta.value.replace(/\{(\w+)\}/g, (all, k) => (k in vals ? String(vals[k] ?? '') : all)).replace(/\n{3,}/g, '\n\n').trim();
       };
-      const draw = () => {
-        const waiting = kind === 'feedback' && !Object.keys(links).length;
-        list.innerHTML = table([
-          { label: 'Customer', cell: c => `${esc(c.name)}<span class="sub">${esc(c.phone)}</span>` },
-          { label: 'Open', cls: 'cell-actions', cell: c => (waiting ? '<span class="muted small">Making links…</span>'
-            : `${opened.has(c.id) ? '<span class="pill green">Opened</span> ' : ''}<a class="btn small ${opened.has(c.id) ? '' : 'primary'}" target="_blank" rel="noopener noreferrer" data-id="${c.id}" href="${esc(waLink(c.phone, fill(c)))}">Open WhatsApp</a>`) },
-        ], customers);
+      const lastSent = c => (recent[c.id] || {})[kind];
+      const current = () => customers[at];
+      const preview = () => {
+        const c = current() || customers[0];
+        d.querySelector('#wa-to').textContent = `To ${c.name} · ${c.phone}`;
+        d.querySelector('#wa-bubble').textContent = fill(c);
       };
+      const link = c => esc(waLink(c.phone, fill(c)));
+      const draw = () => {
+        preview();
+        const waiting = kind === 'feedback' && !Object.keys(links).length;
+        const c = current();
+        const flag = x => (lastSent(x) ? `<span class="pill amber">${esc(SHORT[kind])} sent ${esc(daysAgo(lastSent(x)))}</span>` : '');
+        const opened = [...done.values()].filter(v => v === 'opened').length; const skipped = [...done.values()].filter(v => v === 'skipped').length;
+        let now;
+        if (!c) now = `<div class="wa-now done"><div><b>All done.</b> <span class="muted">${opened} opened${skipped ? ` · ${skipped} skipped` : ''}</span></div><button class="btn" type="button" data-again>Start again</button></div>`;
+        else if (waiting) now = '<div class="wa-now"><span class="muted">Making the feedback links…</span></div>';
+        else now = `<div class="wa-now"><div><div class="wa-who">${many ? `${at + 1}. ` : ''}${esc(c.name)}</div><div class="muted small">${esc(c.phone)}</div>${flag(c)}</div>
+          <div class="btn-row">${many ? '<button class="btn" type="button" data-skip>Skip</button>' : ''}<a class="btn primary" target="_blank" rel="noopener noreferrer" data-open="${c.id}" href="${link(c)}">${done.get(c.id) === 'opened' ? 'Open again' : 'Open WhatsApp'} ↗</a></div></div>`;
+        const rows = many ? customers.map((x, i) => ({ x, i })) : [];
+        const from = Math.max(0, Math.min(at - 3, rows.length - 8)); const show = rows.slice(from, from + 8); // a window around the current customer
+        q.innerHTML = `<div class="wa-q">${many ? `<div class="wa-q-head"><b>One by one</b><span class="muted small">${opened} of ${customers.length} opened${skipped ? ` · ${skipped} skipped` : ''}</span></div>
+            <div class="wa-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${customers.length}" aria-valuenow="${opened + skipped}"><i data-w="${Math.round(((opened + skipped) / customers.length) * 100)}"></i></div>` : ''}
+          ${now}
+          ${many ? `<ol class="wa-list">${show.map(({ x, i }) => `<li class="${i === at ? 'on' : ''}"><button type="button" data-go="${i}">${i + 1}. ${esc(x.name)}</button>${lastSent(x) && !done.has(x.id) ? ' <span class="muted small">· sent before</span>' : ''}
+            <span>${done.get(x.id) === 'opened' ? '<span class="pill green">Opened</span>' : done.get(x.id) === 'skipped' ? '<span class="pill amber">Skipped</span>' : i === at ? '<span class="muted small">now</span>' : ''}</span></li>`).join('')}</ol>
+            ${rows.length > show.length ? `<div class="muted small">Showing ${from + 1}–${from + show.length} of ${rows.length}</div>` : ''}` : ''}</div>`;
+        q.querySelectorAll('i[data-w]').forEach(i => { i.style.width = i.dataset.w + '%'; });
+      };
+      const next = () => { const i = customers.findIndex((x, k) => k > at && !done.has(x.id)); at = i >= 0 ? i : customers.findIndex(x => !done.has(x.id)); if (at < 0) at = customers.length; };
       const setKind = async k => {
         kind = k;
         ta.value = m.templates[k] || '';
         d.querySelector('#wa-book-f').classList.toggle('hidden', k !== 'new_product');
         const warn = { coupon: !m.coupon && 'No coupon is set yet. The Admin adds it in Settings → General → Customer messages.',
           review: !m.review_url && 'No website review page is set yet, so the link goes to the website.', academy: !m.academy_url && 'No Academy link is set yet. The Admin adds it in Settings.' }[k];
-        d.querySelector('#wa-warn').innerHTML = warn ? `<div class="notice warn">${esc(warn)}</div>` : '';
-        d.querySelector('#wa-hint').textContent = k === 'feedback' ? 'Each customer gets their own feedback link in place of {link}. {name} becomes their first name.' : '{name} becomes each customer\'s first name. Change the text here for this message only; the Admin sets the usual wording in Settings.';
+        const again = customers.filter(lastSent).length;
+        d.querySelector('#wa-warn').innerHTML = (warn ? `<div class="notice warn">${esc(warn)}</div>` : '') + (again ? `<div class="notice info small">${again === customers.length && !many ? 'This customer was' : `${again} of these customers were`} sent a ${esc(SHORT[k].toLowerCase())} message in the last 30 days.</div>` : '');
+        d.querySelector('#wa-hint').textContent = k === 'feedback' ? 'Each customer gets their own feedback link in place of {link}. {name} becomes their first name.' : "{name} becomes each customer's first name. The Admin sets the usual wording in Settings.";
         if (k === 'feedback' && !Object.keys(links).length) {
           draw();
           if (!record) { toast('Feedback links need Edit access to Customers', 'error'); return; }
@@ -65,18 +97,23 @@ export function whatsappDrawer(customers, opts = {}) {
         }
         draw();
       };
-      d.querySelector('.msg-types').addEventListener('change', e => { if (e.target.name === 'wa-kind') setKind(e.target.value); });
+      d.querySelector('.wa-kinds').addEventListener('change', e => { if (e.target.name === 'wa-kind') setKind(e.target.value); });
       d.querySelector('#wa-book').addEventListener('change', draw);
       ta.addEventListener('input', draw);
-      list.addEventListener('click', e => {
-        const a = e.target.closest('a[data-id]'); if (!a) return;
-        const id = Number(a.dataset.id); opened.add(id);
+      q.addEventListener('click', e => {
+        const go = e.target.closest('[data-go]'); if (go) { at = Number(go.dataset.go); draw(); return; }
+        if (e.target.closest('[data-skip]')) { done.set(current().id, 'skipped'); next(); draw(); return; }
+        if (e.target.closest('[data-again]')) { done.clear(); at = 0; draw(); return; }
+        const a = e.target.closest('a[data-open]'); if (!a) return;
+        const id = Number(a.dataset.open); done.set(id, 'opened');
         if (record) {
           api('POST', `/api/customers/${id}/messages`, { kind, list_id: opts.listId || null, book_id: kind === 'new_product' ? book()?.id : null })
-            .then(() => { sent++; }).catch(err => toast(err.message, 'error'));
+            .then(() => { sent++; (recent[id] = recent[id] || {})[kind] = new Date().toISOString(); }).catch(err => toast(err.message, 'error'));
         }
-        setTimeout(draw, 50);
+        // The link opens WhatsApp in a new tab; when they come back, the next customer is ready.
+        setTimeout(() => { if (many) next(); draw(); }, 400);
       });
+      if (record) api('POST', '/api/customers/recent-messages', { customer_ids: customers.map(c => c.id) }).then(r => { recent = r.recent || {}; setKind(kind); }).catch(() => {});
       setKind(kind);
     },
   });

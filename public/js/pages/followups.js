@@ -107,7 +107,7 @@ async function renderList(page, { id, query }) {
   wireFilters(page.querySelector('#fl-filters'), draw);
   draw();
   page.querySelector('#fl-assign')?.addEventListener('click', () => assignForm(d, reload));
-  page.querySelector('#fl-wa')?.addEventListener('click', () => whatsappDrawer(rows, { listId: d.id, after: reload }));
+  page.querySelector('#fl-wa')?.addEventListener('click', () => whatsappDrawer(rows, { listId: d.id, after: reload, title: rows.length > 1 ? `WhatsApp ${rows.length} customers · ${d.name}` : undefined }));
   page.querySelector('#fl-close')?.addEventListener('click', async e => {
     const b = e.currentTarget; b.disabled = true;
     try { await api('POST', `/api/followups/${id}/${d.closed_at ? 'reopen' : 'close'}`); toast(d.closed_at ? 'List reopened' : 'List closed'); reload(); } catch (err) { toast(err.message, 'error'); b.disabled = false; }

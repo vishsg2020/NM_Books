@@ -4,7 +4,8 @@
 const crypto = require('crypto');
 const { audit } = require('../audit');
 const { bad, notFound, conflict, str, oneOf, idParam, HttpError } = require('../util');
-const { MESSAGE_KINDS, ORDER_KINDS, getMessages } = require('../settings');
+const { MESSAGE_KINDS, ORDER_KINDS, getMessages, getFeedbackPage } = require('../settings');
+const reviews = require('./reviews');
 
 const STATUSES = ['Not contacted yet', 'Contacted', 'No answer', 'Feedback requested', 'Feedback received', 'Review requested', 'Review posted', 'Ordered again', 'Not interested'];
 // How far along a customer is. Something the app notes by itself never moves them back.
@@ -12,13 +13,19 @@ const RANK = { 'Not contacted yet': 0, 'No answer': 1, Contacted: 2, 'Feedback r
 const KIND_STATUS = { feedback: 'Feedback requested', review: 'Review requested' }; // any other message: Contacted
 const LIKED = ['Pictures', 'Easy to read', 'Stories', 'Paper and print', 'Price', 'Other'];
 const REASONS = ['For my child to learn Malayalam', 'As a gift', 'For a school or class', 'For myself', 'Other'];
+// Asked in the chat (C) and "your child's story" (F) page styles.
+const CHANGES = ['Reads on their own', 'Knows the letters', 'Asks for more stories', 'Speaks more Malayalam', 'Not started yet'];
+const AGES = ['3-5', '6-8', '9-12', '12+'];
+const STYLES = ['A', 'C', 'E', 'F'];
 const FILTER_KEYS = ['q', 'source', 'orders', 'bulk', 'type', 'state', 'location', 'bought', 'not_bought', 'kind', 'outstanding', 'not_since', 'sort', 'view', 'reason', 'ready_for'];
 const MAX_MEMBERS = 5000;
 const CHANGE_DAYS = 7; // a feedback answer can be changed for a week
 const TOKEN = /^[A-Za-z0-9_-]{20,64}$/;
 
 const parse = v => { try { return v ? JSON.parse(v) : []; } catch { return []; } };
-const feedbackRow = r => ({ id: r.id, stars: r.stars, liked: parse(r.liked_json), reasons: parse(r.reasons_json), comment: r.comment, submitted_at: r.submitted_at, requested_at: r.requested_at, customer_id: r.customer_id, customer_name: r.customer_name, customer_code: r.customer_code });
+const feedbackRow = r => ({ id: r.id, stars: r.stars, liked: parse(r.liked_json), reasons: parse(r.reasons_json), changes: parse(r.changes_json), child_age: r.child_age || null,
+  comment: r.comment, style: r.style || null, website_answer: r.website_answer || null, review_status: r.review_status || null, called_back: !!r.called_back,
+  submitted_at: r.submitted_at, requested_at: r.requested_at, customer_id: r.customer_id, customer_name: r.customer_name, customer_code: r.customer_code, customer_place: r.customer_place || null, customer_phone: r.customer_phone || null });
 /** UTC ISO time → "YYYY-MM-DDTHH:MM" in India, to compare with call times. */
 const ist = iso => new Date(Date.parse(iso) + 5.5 * 3600e3).toISOString().slice(0, 16);
 
@@ -201,6 +208,17 @@ module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () =>
     res.json({ links: out });
   });
 
+  // Messages opened for these customers in the last 30 days, so nobody is sent the same thing twice by mistake.
+  app.post('/api/customers/recent-messages', perm('customers'), async (req, res) => {
+    const ids = [...new Set((Array.isArray(req.body.customer_ids) ? req.body.customer_ids : []).map(idParam))].filter(i => i > 0).slice(0, 2000);
+    const out = {};
+    if (ids.length) {
+      for (const r of await db.all(`SELECT customer_id, kind, MAX(created_at) AS at FROM customer_messages WHERE customer_id = ANY(?::int[])
+          AND created_at > to_char((now() - interval '30 days') AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS') GROUP BY customer_id, kind`, [ids])) (out[r.customer_id] = out[r.customer_id] || {})[r.kind] = r.at;
+    }
+    res.json({ recent: out });
+  });
+
   // Notes that a WhatsApp message was opened for the customer, and moves them along in their open follow-up lists.
   app.post('/api/customers/:id/messages', perm('customers'), async (req, res) => {
     const cid = idParam(req.params.id);
@@ -223,13 +241,23 @@ module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () =>
   });
 
   // ── Feedback answers ─────────────────────────────────────────────────────
+  // called_back: a call was logged to the customer after they answered (low ratings get a call back).
   app.get('/api/feedback', perm('customers'), async (_req, res) => {
-    const rows = (await db.all(`SELECT f.*, c.name AS customer_name, c.code AS customer_code FROM feedback f JOIN customers c ON c.id = f.customer_id
+    const rows = (await db.all(`SELECT f.*, c.name AS customer_name, c.code AS customer_code, c.phone AS customer_phone, COALESCE(c.location, c.state) AS customer_place, w.status AS review_status,
+        EXISTS (SELECT 1 FROM calls k WHERE k.customer_id = f.customer_id
+          AND k.called_at >= to_char((f.submitted_at::timestamptz AT TIME ZONE 'UTC') + interval '330 minutes', 'YYYY-MM-DD"T"HH24:MI')) AS called_back
+      FROM feedback f JOIN customers c ON c.id = f.customer_id LEFT JOIN website_reviews w ON w.feedback_id = f.id
       WHERE f.submitted_at IS NOT NULL ORDER BY f.submitted_at DESC LIMIT 500`)).map(feedbackRow);
-    const t = await db.get(`SELECT COUNT(*) FILTER (WHERE submitted_at IS NOT NULL) AS answered, COUNT(*) AS sent, AVG(stars) AS avg FROM feedback`);
+    const t = await db.get(`SELECT COUNT(*) FILTER (WHERE submitted_at IS NOT NULL) AS answered, COUNT(*) AS sent, AVG(stars) AS avg,
+      AVG(stars) FILTER (WHERE submitted_at > to_char((now() - interval '90 days') AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS')) AS avg90 FROM feedback`);
+    const w = await db.get(`SELECT COUNT(*) FILTER (WHERE status = 'waiting') AS waiting FROM website_reviews`);
     const tally = (key, opts) => opts.map(o => [o, rows.filter(r => r[key].includes(o)).length]);
     const stars = [5, 4, 3, 2, 1].map(s => [s, rows.filter(r => r.stars === s).length]);
-    res.json({ answered: t.answered, sent: t.sent, average: t.avg === null ? null : Math.round(Number(t.avg) * 10) / 10, stars, liked: tally('liked', LIKED), reasons: tally('reasons', REASONS), rows });
+    const round = v => (v === null ? null : Math.round(Number(v) * 10) / 10);
+    const low = rows.filter(r => r.stars <= 3);
+    res.json({ answered: t.answered, sent: t.sent, average: round(t.avg), average_90: round(t.avg90), stars, liked: tally('liked', LIKED), reasons: tally('reasons', REASONS),
+      changes: tally('changes', CHANGES), ages: AGES.map(a => [a, rows.filter(r => r.child_age === a).length]),
+      website_yes: rows.filter(r => r.website_answer === 'yes').length, reviews_waiting: w.waiting, low: low.length, low_not_called: low.filter(r => !r.called_back).length, rows });
   });
 };
 
@@ -240,7 +268,7 @@ module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () =>
 function publicRoutes(app, db) {
   const load = async token => {
     if (!TOKEN.test(String(token))) throw new HttpError(404, 'This feedback link is not valid');
-    const f = await db.get(`SELECT f.*, c.name FROM feedback f JOIN customers c ON c.id = f.customer_id WHERE f.token = ?`, [token]);
+    const f = await db.get(`SELECT f.*, c.name, c.location, c.state FROM feedback f JOIN customers c ON c.id = f.customer_id WHERE f.token = ?`, [token]);
     if (!f) throw new HttpError(404, 'This feedback link is not valid');
     return f;
   };
@@ -248,14 +276,24 @@ function publicRoutes(app, db) {
   const view = async f => {
     const m = await getMessages(db);
     const first = String(f.name || '').trim().split(/\s+/)[0];
+    // A customer who already answered keeps the look they answered in; a new answer gets the style set in Settings.
+    const style = f.submitted_at && STYLES.includes(f.style) ? f.style : (await getFeedbackPage(db)).style;
+    const bookId = await reviews.bookFor(db, f.customer_id);
+    const book = bookId ? await db.get('SELECT name, name_ml FROM books WHERE id = ?', [bookId]) : null;
     return {
-      first_name: /^name\b/i.test(first) ? '' : first.slice(0, 40), stars: f.stars, liked: parse(f.liked_json), reasons: parse(f.reasons_json), comment: f.comment || '',
-      submitted: !!f.submitted_at, can_change: editable(f), options: { liked: LIKED, reasons: REASONS },
+      book_name: book ? book.name : null, book_name_ml: book ? book.name_ml || null : null,
+      style, lang: f.lang || null,
+      first_name: /^name\b/i.test(first) ? '' : first.slice(0, 40), name_shown: reviews.nameShown(f.name), place_shown: reviews.placeShown(f),
+      stars: f.stars, liked: parse(f.liked_json), reasons: parse(f.reasons_json), changes: parse(f.changes_json), child_age: f.child_age || null, comment: f.comment || '',
+      submitted: !!f.submitted_at, can_change: editable(f), options: { liked: LIKED, reasons: REASONS, changes: CHANGES, ages: AGES },
+      // "May we show this on the website?": asked for 4 or 5 stars with a comment, unless they wrote a review on the website.
+      website: { eligible: reviews.eligible(f), answer: f.website_answer || null, review_clicked: !!f.review_clicked_at },
       review_url: m.review_url || null, website_url: m.website_url || null,
       share_text: `Nalla Malayalam books help children learn to read Malayalam. Have a look: ${m.website_url || ''}`.trim(),
     };
   };
-  app.get('/api/public/feedback/:token', async (req, res) => { res.set('Cache-Control', 'no-store'); res.json(await view(await load(req.params.token))); });
+  const send = async (res, token) => { res.set('Cache-Control', 'no-store'); res.json(await view(await load(token))); };
+  app.get('/api/public/feedback/:token', async (req, res) => send(res, req.params.token));
   app.post('/api/public/feedback/:token', async (req, res) => {
     const f = await load(req.params.token);
     if (!editable(f)) throw conflict('Thank you! This answer can no longer be changed.');
@@ -264,13 +302,36 @@ function publicRoutes(app, db) {
     if (!Number.isInteger(stars) || stars < 1 || stars > 5) throw bad('Tap a star to rate the books');
     const pick = (v, opts) => [...new Set((Array.isArray(v) ? v : []).map(String))].filter(x => opts.includes(x));
     const comment = str(b.comment, { name: 'Comment', max: 1000 }) || null;
+    const style = STYLES.includes(b.style) ? b.style : null;
+    const lang = ['ml', 'en'].includes(b.lang) ? b.lang : null;
+    const age = AGES.includes(b.child_age) ? b.child_age : null;
     await db.tx(async t => {
-      await t.run(`UPDATE feedback SET stars = ?, liked_json = ?, reasons_json = ?, comment = ?, submitted_at = COALESCE(submitted_at, now_iso()), updated_at = now_iso() WHERE id = ?`,
-        [stars, JSON.stringify(pick(b.liked, LIKED)), JSON.stringify(pick(b.reasons, REASONS)), comment, f.id]);
+      await t.run(`UPDATE feedback SET stars = ?, liked_json = ?, reasons_json = ?, changes_json = ?, child_age = ?, comment = ?, style = COALESCE(?, style), lang = COALESCE(?, lang),
+        submitted_at = COALESCE(submitted_at, now_iso()), updated_at = now_iso() WHERE id = ?`,
+      [stars, JSON.stringify(pick(b.liked, LIKED)), JSON.stringify(pick(b.reasons, REASONS)), JSON.stringify(pick(b.changes, CHANGES)), age, comment, style, lang, f.id]);
       await bumpLists(t, f.customer_id, 'Feedback received', null);
+      // Already said yes to the website: the review follows the changed answer (or is taken off if it no longer fits).
+      if (f.website_answer) await reviews.syncFromFeedback(t, f.id);
     });
-    res.set('Cache-Control', 'no-store');
-    res.json(await view(await load(req.params.token)));
+    await send(res, req.params.token);
+  });
+  // The customer's answer to "may we show this on our website?". They can change it at any time, even after the week.
+  app.post('/api/public/feedback/:token/website', async (req, res) => {
+    const f = await load(req.params.token);
+    if (!f.submitted_at) throw bad('Please send your answer first');
+    const answer = oneOf((req.body || {}).answer, ['yes', 'no'], { name: 'Answer', required: true });
+    if (answer === 'yes' && !reviews.eligible(f)) throw bad('Only a 4 or 5 star answer with a few words can go on the website');
+    await db.tx(async t => {
+      await t.run('UPDATE feedback SET website_answer = ?, website_answer_at = now_iso(), updated_at = now_iso() WHERE id = ?', [answer, f.id]);
+      await reviews.syncFromFeedback(t, f.id);
+    });
+    await send(res, req.params.token);
+  });
+  // Tapped "write a review on the website": they are not asked the website question after that.
+  app.post('/api/public/feedback/:token/review-click', async (req, res) => {
+    const f = await load(req.params.token);
+    if (f.submitted_at && !f.review_clicked_at) await db.run('UPDATE feedback SET review_clicked_at = now_iso() WHERE id = ?', [f.id]);
+    res.set('Cache-Control', 'no-store'); res.json({ ok: true });
   });
 }
 
@@ -280,3 +341,5 @@ module.exports.feedbackRow = feedbackRow;
 module.exports.STATUSES = STATUSES;
 module.exports.LIKED = LIKED;
 module.exports.REASONS = REASONS;
+module.exports.CHANGES = CHANGES;
+module.exports.AGES = AGES;

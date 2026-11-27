@@ -27,7 +27,7 @@ function client() {
     return { status: res.status, data };
   }
   return {
-    send: (m, u, b) => call(m, u, b), get: u => call('GET', u), post: (u, b) => call('POST', u, b), patch: (u, b) => call('PATCH', u, b),
+    send: (m, u, b) => call(m, u, b), cookie: () => cookie, get: u => call('GET', u), post: (u, b) => call('POST', u, b), patch: (u, b) => call('PATCH', u, b),
     login: async email => { const r = await call('POST', '/api/login', { email, password: pw }); assert.equal(r.status, 200, JSON.stringify(r.data)); return r; },
   };
 }

@@ -711,3 +711,78 @@ fieldset.msg-types { border: 0; padding: 0; margin: 0 0 12px; min-width: 0; }
 fieldset.assign-group { border: 1px solid var(--line, #e2e2dc); border-radius: 10px; padding: 8px 14px 10px; margin: 0 0 12px; }
 fieldset.assign-group legend { font-weight: 600; padding: 0 4px; }
 fieldset.assign-group .check { display: flex; gap: 8px; align-items: center; padding: 4px 0; }
+
+/* Customers → Feedback: answer cards (28 Nov 2026) */
+.tabs .count.amber { background: var(--turmeric-soft); color: var(--turmeric-ink); }
+.fbx-filters .chip.on { background: var(--green-soft); }
+.fbx-charts > summary { cursor: pointer; font-weight: 600; }
+.fbx-charts h3 { font-size: 15px; margin-bottom: 8px; }
+.fbx-list { display: grid; gap: 10px; }
+.fbx { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); padding: 12px 14px; }
+.fbx.low { border-left: 4px solid var(--red); }
+.fbx-head { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: baseline; }
+.fbx blockquote { margin: 6px 0; font-size: 15px; line-height: 1.5; }
+.fbx-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.fbx-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; text-align: right; min-width: 150px; }
+.stars-ro { white-space: nowrap; }
+.fb-item { border-bottom: 1px solid var(--line); padding: 8px 0; }
+.fb-item blockquote { margin: 4px 0 0; padding-left: 10px; border-left: 3px solid var(--brand); color: var(--ink); }
+@media (max-width: 640px) { .fbx { grid-template-columns: 1fr; } .fbx-side { align-items: flex-start; text-align: left; flex-direction: row; flex-wrap: wrap; min-width: 0; } }
+
+/* Customers → Website reviews: the approval queue and the table */
+.rq { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
+.rq-main { padding: 20px 22px; }
+.rq-stars { font-size: 22px; margin-top: 8px; }
+.rq-text { font-size: 20px; line-height: 1.6; margin: 12px 0; overflow-wrap: anywhere; }
+.rq-who { font-weight: 700; font-size: 16px; }
+.rq-who .muted { font-weight: 400; }
+.rq-acts { margin: 16px 0 6px; }
+.rq-side h3 { font-size: 15px; margin-bottom: 8px; }
+.rq-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 300px; overflow: auto; }
+.rq-list button { width: 100%; text-align: left; background: none; border: 0; border-radius: 8px; padding: 7px 8px; font: inherit; font-size: 14px; color: var(--ink); cursor: pointer; }
+.rq-list li.on button { background: var(--green-soft); }
+.rq-list button:hover { background: var(--surface); }
+.rv-web { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: #FFFDF7; font-size: 14px; }
+.rv-web p { margin: 6px 0; line-height: 1.5; overflow-wrap: anywhere; }
+.rv-site { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.rv-who { font-weight: 700; }
+.rv-who .muted { font-weight: 400; }
+.rv-text { max-width: 46ch; line-height: 1.5; }
+.bulkbar { display: flex; gap: 10px; align-items: center; background: var(--ink); color: #fff; border-radius: 10px; padding: 8px 12px; margin-bottom: 10px; }
+.bulkbar[hidden] { display: none; }
+.cell-check { width: 36px; }
+.cell-check input { width: 18px; height: 18px; }
+.consent-box { border: 1.5px solid var(--green); background: var(--green-soft); border-radius: 10px; padding: 10px 14px 0; margin: 6px 0 8px; }
+.inline-search { display: flex; gap: 8px; }
+.inline-search input { flex: 1; }
+@media (max-width: 900px) { .rq { grid-template-columns: 1fr; } }
+
+/* WhatsApp drawer: grouped message choices, preview, one by one */
+fieldset.wa-kinds { border: 0; padding: 0; margin: 0 0 12px; min-width: 0; display: grid; gap: 6px; }
+.wa-group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.wa-g { width: 52px; font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.wa-chip { position: relative; margin: 0; }
+.wa-chip input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.wa-chip span { display: block; border: 1px solid var(--line); border-radius: 999px; padding: 6px 13px; font-size: 13.5px; background: var(--paper); cursor: pointer; }
+.wa-chip input:checked + span { background: var(--green); border-color: var(--green); color: #fff; font-weight: 600; }
+.wa-chip input:focus-visible + span { outline: 2px solid var(--brand); outline-offset: 2px; }
+.wa-cols { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; }
+.wa-preview { background: #E7DDD3; border-radius: 10px; padding: 12px; min-height: 150px; }
+.wa-to { font-size: 12px; color: #54656F; margin-bottom: 6px; }
+.wa-bubble { background: #D9FDD3; border-radius: 8px 0 8px 8px; padding: 8px 10px; font-size: 13.5px; line-height: 1.45; max-width: 95%; margin-left: auto; white-space: pre-line; overflow-wrap: anywhere; box-shadow: 0 1px 1px rgba(0,0,0,.12); }
+.wa-q { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-top: 12px; background: var(--paper); }
+.wa-q-head { display: flex; justify-content: space-between; align-items: baseline; }
+.wa-progress { height: 8px; background: var(--grey-soft); border-radius: 4px; overflow: hidden; margin: 6px 0 12px; }
+.wa-progress i { display: block; height: 100%; width: 0; background: var(--green); }
+.wa-now { display: flex; justify-content: space-between; align-items: center; gap: 10px; border: 2px solid var(--green); border-radius: 10px; padding: 10px 12px; background: var(--green-soft); flex-wrap: wrap; }
+.wa-now .btn-row { margin: 0; }
+.wa-now.done { border-color: var(--line); background: var(--surface); }
+.wa-who { font-weight: 700; font-size: 16px; }
+.wa-list { list-style: none; margin: 10px 0 0; padding: 0; font-size: 14px; }
+.wa-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); padding: 2px 0; }
+.wa-list li.on { font-weight: 700; }
+.wa-list button { background: none; border: 0; padding: 6px 2px; font: inherit; color: inherit; cursor: pointer; text-align: left; }
+@media (max-width: 640px) { .wa-cols { grid-template-columns: 1fr; } .wa-g { width: 100%; } }
+.rq > .panel { margin: 0; }
+.fbx-who { white-space: normal; }
+@media (max-width: 720px) { .tabs { overflow-x: auto; scrollbar-width: thin; } .tabs a { white-space: nowrap; flex: 0 0 auto; } }

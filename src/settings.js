@@ -100,7 +100,7 @@ function cleanCostRules(body) {
 // {name} the customer's first name, {link} their feedback link, {review_link}, {website}, {coupon},
 // {product} and {price} the book chosen, {academy_text}, {academy_link}.
 const MESSAGE_KINDS = [
-  ['feedback', 'Feedback request', 'A link with star rating and two quick questions'],
+  ['feedback', 'Feedback request', 'Their own link: stars, a few taps and a comment'],
   ['review', 'Website review request', 'Ask for a review on the website; a coupon after they send a screenshot'],
   ['coupon', 'Coupon (after a review)', 'Send the coupon once they have shown their review'],
   ['new_product', 'New product', 'Tell them about a book or set'],
@@ -223,4 +223,22 @@ function cleanNextBook(body, skus) {
   return { months, steps };
 }
 
-module.exports = { ORDER_KINDS, SHIPPING_FIELDS, getShipping, cleanShipping, getNextBook, cleanNextBook, DEFAULT_NEXT_BOOK, MESSAGE_KINDS, MESSAGE_FIELDS, DEFAULT_MESSAGES, getMessages, cleanMessages, getCharges, cleanCharges, DEFAULT_CHARGES, getLists, cleanList, getCostRules, cleanCostRules, write, read, DEFAULT_LISTS, LOCKED, LIST_NAMES, COST_PARTS, COST_MODES, DEFAULT_COST_RULES };
+// ---------- Customer feedback page (Settings → General → Feedback page) ----------
+// The look of the page a customer opens from their feedback link. C and F also ask about the child.
+const FEEDBACK_STYLES = [
+  ['F', "Your child's story", 'One step at a time about what changed for the child; their review card fills in as they answer'],
+  ['A', 'Simple page', 'Everything on one screen'],
+  ['C', 'WhatsApp-style chat', 'Questions as chat messages with tap-to-answer replies'],
+  ['E', 'Postcard', 'They write a postcard to Nalla Malayalam; "pin it on the readers\' wall" for the website'],
+];
+async function getFeedbackPage(db) {
+  const saved = (await read(db, 'feedback_page')) || {};
+  return { style: FEEDBACK_STYLES.some(s => s[0] === saved.style) ? saved.style : 'F' };
+}
+function cleanFeedbackPage(body) {
+  const style = String((body && body.style) || '');
+  if (!FEEDBACK_STYLES.some(s => s[0] === style)) throw bad('Choose a page style', { field: 'Page style' });
+  return { style };
+}
+
+module.exports = { FEEDBACK_STYLES, getFeedbackPage, cleanFeedbackPage, ORDER_KINDS, SHIPPING_FIELDS, getShipping, cleanShipping, getNextBook, cleanNextBook, DEFAULT_NEXT_BOOK, MESSAGE_KINDS, MESSAGE_FIELDS, DEFAULT_MESSAGES, getMessages, cleanMessages, getCharges, cleanCharges, DEFAULT_CHARGES, getLists, cleanList, getCostRules, cleanCostRules, write, read, DEFAULT_LISTS, LOCKED, LIST_NAMES, COST_PARTS, COST_MODES, DEFAULT_COST_RULES };

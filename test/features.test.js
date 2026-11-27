@@ -470,3 +470,106 @@ test('follow-up lists: Admin or Manager assigns a list to several people; they w
   assert.equal((await T.get(`/api/followups/${list.id}`)).status, 403);
   assert.deepEqual((await M.get('/api/followups')).data.lists.find(l => l.id === list.id).assignees, []);
 });
+
+test('website reviews: the page style in Settings; the customer says yes or no; approval, edits, download; reviews added by the team', async () => {
+  // Settings → Feedback page: F by default; only the Admin changes it
+  assert.equal((await T.get('/api/settings/lists')).data.feedback_page.style, 'F');
+  assert.equal((await M.send('PUT', '/api/settings/feedback-page', { style: 'A' })).status, 403);
+  assert.equal((await A.send('PUT', '/api/settings/feedback-page', { style: 'Z' })).status, 400);
+  ok(await A.send('PUT', '/api/settings/feedback-page', { style: 'C' }), 200);
+  // a customer with an order, and their feedback link
+  ok(await T.post('/api/sales', { customer_name: 'ANITHA SURESH', customer_phone: '9600000001', address: 'House 5, Temple Road', state: 'Kerala', location: 'Thrissur', pin: '680002', items: [{ book_id: maam.id, qty: 1 }] }));
+  const cust = (await T.get('/api/customers?q=9600000001')).data.rows[0];
+  const token = ok(await T.post('/api/feedback/links', { customer_ids: [cust.id] }), 200).links[cust.id];
+  let v = ok(await anon.get(`/api/public/feedback/${token}`), 200);
+  assert.equal(v.style, 'C'); assert.equal(v.name_shown, 'Anitha'); assert.equal(v.place_shown, 'Thrissur');
+  assert.deepEqual(v.options.ages, ['3-5', '6-8', '9-12', '12+']); assert.equal(v.website.eligible, false);
+  assert.equal((await anon.post(`/api/public/feedback/${token}/website`, { answer: 'yes' })).status, 400); // not answered yet
+  // the answer, with the questions about the child; the style setting changing later does not change their page
+  const words = 'മോൻ എല്ലാ രാത്രിയും ഈ കഥകൾ വായിക്കും.';
+  v = ok(await anon.post(`/api/public/feedback/${token}`, { stars: 5, comment: words, changes: ['Reads on their own', 'Flies'], child_age: '6-8', style: 'C', lang: 'ml', liked: ['Stories'] }), 200);
+  assert.deepEqual(v.changes, ['Reads on their own']); assert.equal(v.child_age, '6-8'); assert.equal(v.website.eligible, true); assert.equal(v.website.answer, null);
+  ok(await A.send('PUT', '/api/settings/feedback-page', { style: 'E' }), 200);
+  assert.equal((await anon.get(`/api/public/feedback/${token}`)).data.style, 'C');
+  // nothing reaches the website table until the customer says yes
+  assert.equal((await M.get('/api/website-reviews?status=waiting')).data.rows.length, 0);
+  assert.equal((await anon.post(`/api/public/feedback/${token}/website`, { answer: 'maybe' })).status, 400);
+  v = ok(await anon.post(`/api/public/feedback/${token}/website`, { answer: 'yes' }), 200);
+  assert.equal(v.website.answer, 'yes');
+  let w = ok(await M.get('/api/website-reviews?status=waiting'), 200);
+  assert.equal(w.counts.waiting, 1); assert.equal(w.can_approve, true);
+  const rv = w.rows[0];
+  assert.equal(rv.name_shown, 'Anitha'); assert.equal(rv.place_shown, 'Thrissur'); assert.equal(rv.child_age, '6-8'); assert.equal(rv.stars, 5);
+  assert.equal(rv.text, words); assert.equal(rv.language, 'ml'); assert.equal(rv.book_name, 'Maambazham'); assert.equal(rv.source, 'feedback'); assert.equal(rv.customer_id, cust.id);
+  // the Feedback tab shows it
+  let fb = ok(await M.get('/api/feedback'), 200);
+  const row = fb.rows.find(r => r.customer_id === cust.id);
+  assert.equal(row.website_answer, 'yes'); assert.equal(row.review_status, 'waiting'); assert.equal(row.child_age, '6-8'); assert.equal(fb.reviews_waiting, 1);
+  // Tele-sales cannot approve, download, or see the waiting reviews of others
+  assert.equal((await T.get('/api/website-reviews?status=waiting')).data.rows.length, 0);
+  assert.equal((await T.post('/api/website-reviews/status', { ids: [rv.id], status: 'approved' })).status, 403);
+  assert.equal((await T.get('/api/website-reviews/download.xlsx')).status, 403);
+  assert.equal((await D.get('/api/website-reviews')).status, 403); // no Customers access
+  // the Manager fixes the text (her own words are kept) and approves
+  let e = ok(await M.send('PUT', `/api/website-reviews/${rv.id}`, { name_shown: 'Anitha', place_shown: 'Thrissur', child_age: '6-8', text: words + ' നന്ദി!' }), 200);
+  assert.equal(e.edited, true); assert.equal(e.original_text, words); assert.equal(e.stars, 5);
+  assert.equal(ok(await M.post('/api/website-reviews/status', { ids: [rv.id], status: 'approved' }), 200).changed, 1);
+  assert.equal((await T.get('/api/website-reviews?status=approved')).data.rows.length, 1); // everyone sees the approved ones
+  assert.equal((await T.get('/api/website-reviews?status=approved')).data.rows[0].customer_id, null); // but not who it is
+  const x = await fetch(`${base}/api/website-reviews/download.xlsx`, { headers: { Cookie: '' } });
+  assert.equal(x.status, 401);
+  // the customer changes her words within the week: back to waiting with the new words, the edit dropped
+  v = ok(await anon.post(`/api/public/feedback/${token}`, { stars: 5, comment: 'Very good books.', changes: [], child_age: '6-8', style: 'C' }), 200);
+  w = (await M.get('/api/website-reviews?status=waiting')).data;
+  assert.equal(w.rows.length, 1); assert.equal(w.rows[0].text, 'Very good books.'); assert.equal(w.rows[0].edited, false); assert.equal(w.rows[0].language, 'en');
+  // she says no: taken off everywhere; yes again: back, waiting
+  ok(await anon.post(`/api/public/feedback/${token}/website`, { answer: 'no' }), 200);
+  for (const st of ['waiting', 'approved', 'hidden']) assert.ok(!(await M.get(`/api/website-reviews?status=${st}`)).data.rows.some(r => r.id === rv.id));
+  ok(await anon.post(`/api/public/feedback/${token}/website`, { answer: 'yes' }), 200);
+  assert.equal((await M.get('/api/website-reviews?status=waiting')).data.rows[0].id, rv.id);
+  // 3 stars: no longer fits, so it is taken off, and a yes is refused
+  ok(await anon.post(`/api/public/feedback/${token}`, { stars: 3, comment: 'Came late.', style: 'C' }), 200);
+  assert.equal((await M.get('/api/website-reviews?status=waiting')).data.rows.length, 0);
+  assert.equal((await anon.post(`/api/public/feedback/${token}/website`, { answer: 'yes' })).status, 400);
+  // a low rating needs a call back until someone calls
+  fb = (await M.get('/api/feedback')).data;
+  assert.ok(fb.low >= 1); assert.equal(fb.rows.find(r => r.customer_id === cust.id).called_back, false);
+  const lowBefore = fb.low_not_called;
+  await db.run(`UPDATE feedback SET submitted_at = '2026-11-15T00:00:00.000Z' WHERE token = ?`, [token]); // tests call "today" 16 Nov
+  ok(await T.post('/api/calls', { phone: '9600000001', status: 'Answered', outcome: 'Interested' }));
+  fb = (await M.get('/api/feedback')).data;
+  assert.equal(fb.rows.find(r => r.customer_id === cust.id).called_back, true); assert.equal(fb.low_not_called, lowBefore - 1);
+  // after the week the answer is fixed, but the website answer can still be changed
+  await db.run('UPDATE feedback SET submitted_at = now_iso() WHERE token = ?', [token]);
+  ok(await anon.post(`/api/public/feedback/${token}`, { stars: 5, comment: 'Lovely pictures, my son reads every night.', child_age: '6-8', style: 'C' }), 200);
+  await db.run(`UPDATE feedback SET submitted_at = '2026-10-01T00:00:00.000Z' WHERE token = ?`, [token]);
+  assert.equal((await anon.post(`/api/public/feedback/${token}`, { stars: 4, comment: 'ok', style: 'C' })).status, 409);
+  ok(await anon.post(`/api/public/feedback/${token}/website`, { answer: 'yes' }), 200);
+  ok(await anon.post(`/api/public/feedback/${token}/review-click`), 200);
+  assert.equal((await anon.get(`/api/public/feedback/${token}`)).data.website.review_clicked, true);
+  // a review the team adds: the customer must have agreed, with a note of how
+  const add = { name_shown: 'Jose', place_shown: 'Bengaluru', stars: 5, text: 'Ordered 12 sets for our Sunday class. The kids loved them.', source: 'whatsapp', book_id: maam.id };
+  assert.equal((await T.post('/api/website-reviews', add)).status, 400);
+  assert.equal((await T.post('/api/website-reviews', { ...add, consent: true })).status, 400);
+  assert.equal((await T.post('/api/website-reviews', { ...add, source: 'feedback', consent: true, consent_note: 'x' })).status, 400);
+  const mine = ok(await T.post('/api/website-reviews', { ...add, consent: true, consent_note: 'Said OK in the WhatsApp chat' }));
+  assert.equal(mine.status, 'waiting'); assert.equal(mine.mine, true); assert.equal(mine.consent_by_name, 'telesales user');
+  assert.equal((await T.get('/api/website-reviews?status=waiting')).data.rows.length, 1); // their own
+  ok(await T.send('PUT', `/api/website-reviews/${mine.id}`, { ...add, text: 'Ordered 12 sets for our Sunday Malayalam class.' }), 200);
+  const both = (await M.get('/api/website-reviews?status=waiting')).data.rows.map(r => r.id);
+  assert.equal(both.length, 2);
+  assert.equal(ok(await M.post('/api/website-reviews/status', { ids: both, status: 'approved' }), 200).changed, 2);
+  assert.equal((await T.send('PUT', `/api/website-reviews/${mine.id}`, add)).status, 403); // approved: Admin or Manager only
+  ok(await M.post('/api/website-reviews/status', { ids: [mine.id], status: 'hidden' }), 200);
+  w = (await M.get('/api/website-reviews?status=approved')).data;
+  assert.equal(w.counts.approved, 1); assert.equal(w.counts.hidden, 1); assert.equal(w.average, 5);
+  // the download: approved only, as an Excel file
+  const dl = await fetch(`${base}/api/website-reviews/download.xlsx`, { headers: { Cookie: M.cookie() } });
+  assert.equal(dl.status, 200); assert.match(dl.headers.get('content-type'), /spreadsheetml/); assert.equal(dl.headers.get('x-review-count'), '1');
+  const ExcelJS = require('exceljs'); const wb = new ExcelJS.Workbook(); await wb.xlsx.load(Buffer.from(await dl.arrayBuffer()));
+  const sheet = wb.getWorksheet('Website reviews');
+  assert.equal(sheet.getRow(1).getCell(1).value, 'Name'); assert.equal(sheet.getRow(2).getCell(1).value, 'Anitha');
+  assert.equal(sheet.getRow(2).getCell(3).value, 'Parent of a 6–8 year old'); assert.equal(sheet.rowCount, 2);
+  // feedback answered before this change never goes on the website
+  assert.equal((await db.get(`SELECT COUNT(*) AS n FROM website_reviews r JOIN feedback f ON f.id = r.feedback_id WHERE f.comment = 'Lovely'`)).n, 0);
+});

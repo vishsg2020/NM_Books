@@ -52,6 +52,9 @@ async function renderGeneral(page) {
           ${k === 'coupon' ? '<div class="hint">Sent once a customer shows their website review. For example: THANKYOU10 (10% off your next order on the website).</div>' : k === 'review_url' ? '<div class="hint">Where customers write a review. Empty: the website address is used.</div>' : ''}</div>`).join(''))}</div>
         ${raw([...(state.messageKinds || []), ...(state.orderKinds || [])].map(([k, l, h]) => `<div class="field"><label for="mt-${k}">${esc(l)}</label><textarea id="mt-${k}" name="t:${k}" rows="3" maxlength="1000">${esc(state.messages.templates[k] || '')}</textarea><div class="hint">${esc(h)}</div></div>`).join(''))}
         <button class="btn primary" type="submit">Save customer messages</button></form></section>
+    <section class="panel"><h2>Feedback page</h2><p class="muted">How the page looks when a customer opens their feedback link. It opens in Malayalam with an English switch. A customer who already answered keeps the look they answered in. "Your child's story" and the chat also ask what changed for the child and the child's age.</p>
+      <form id="f-fbp" novalidate><fieldset class="msg-types"><legend class="sr-only">Page style</legend>${raw((state.feedbackStyles || []).map(([k, l, h]) => `<label class="msg-type"><input type="radio" name="style" value="${k}" ${k === state.feedbackPage.style ? 'checked' : ''}><span><b>${esc(l)}</b><small>${esc(h)}</small></span></label>`).join(''))}</fieldset>
+        <button class="btn primary" type="submit">Save feedback page</button></form></section>
     <section class="panel"><h2>Labels and bills</h2><p class="muted">Printed on every address label and bill.</p>
       <form id="f-ship" novalidate><div class="grid2">${raw((state.shippingFields || []).map(([k, l]) => `<div class="field${k === 'from_address' ? ' span2' : ''}"><label for="sh-${k}">${esc(l)}</label><input id="sh-${k}" name="${k}" maxlength="300" value="${esc(state.shipping[k] || '')}"></div>`).join(''))}</div>
         <div class="field"><label for="sh-cour">Couriers, one per line: name | tracking page</label><textarea id="sh-cour" name="couriers" rows="3">${esc(state.shipping.couriers.map(c => `${c.name} | ${c.url}`).join('\n'))}</textarea>
@@ -80,6 +83,7 @@ async function renderGeneral(page) {
     const body = {}; for (const [k, val] of Object.entries(v)) { const [g, c] = k.split(':'); (body[g] = body[g] || {})[c] = val; }
     state.discounts = await api('PUT', '/api/settings/discounts', body); window.dispatchEvent(new Event('nm:changed')); toast('Discounts saved'); renderGeneral(page);
   });
+  onSubmit(page.querySelector('#f-fbp'), async v => { state.feedbackPage = await api('PUT', '/api/settings/feedback-page', { style: v.style }); toast('Feedback page saved'); renderGeneral(page); });
   onSubmit(page.querySelector('#f-dc'), async v => { state.deliveryCheck = await api('PUT', '/api/settings/delivery-check', { days: Number(v.days) }); toast('Delivery check saved'); renderGeneral(page); });
   onSubmit(page.querySelector('#f-ship'), async v => { state.shipping = await api('PUT', '/api/settings/shipping', v); toast('Label details saved'); renderGeneral(page); });
   // Next-book steps: a row per step, "first book → next book".

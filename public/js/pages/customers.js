@@ -5,6 +5,7 @@ import { openSale } from './sales.js';
 import { callsTable, callForm, wireCallActions } from './calls.js';
 import { visitsTable, wireVisitActions } from './visits.js';
 import { saleForm } from './sale-form.js';
+import { customerTabs, renderFeedback, renderReviews } from './reviews.js';
 
 
 // What counts as a bulk order, from Settings: many copies in one order, or a large order amount.
@@ -26,15 +27,13 @@ const reasonPills = c => (c.needs || []).map(r => `<span class="pill amber">${es
 
 export async function renderList(page, { query }) {
   if (query.view === 'feedback') return renderFeedback(page);
+  if (query.view === 'reviews') return renderReviews(page);
   if (query.view === 'next') return renderNextBook(page);
   const update = query.view === 'update';
   const [locations, sum] = await Promise.all([get('/api/customers/locations'), get('/api/customers/update-summary')]);
   const products = state.books.filter(b => b.active && b.sku !== 'OTHER').map(b => [b.id, b.name]);
   const n = v => Number(v || 0).toLocaleString('en-IN');
-  const tabs = `<nav class="tabs" aria-label="Customer lists"><a href="#/customers" ${update ? '' : 'aria-current="page"'}>Customers <span class="count">${n(sum.complete)}</span></a>
-    <a href="#/customers?view=update" ${update ? 'aria-current="page"' : ''}>Update needed <span class="count">${n(sum.needing + sum.sales_without_customer)}</span></a>
-    <a href="#/customers?view=next">Next book</a>
-    <a href="#/customers?view=feedback">Feedback <span class="count">${n(sum.feedback)}</span></a></nav>
+  const tabs = `${customerTabs(update ? 'update' : '', sum)}
     ${query.ready_for ? `<div class="notice info">Showing customers ready for the next book: <b>${esc(String(query.ready_for).replace('>', ' → '))}</b>. <a href="#/customers?view=next">Back to Next book</a></div>` : ''}`;
   page.innerHTML = html`<div class="page-head"><div><h1>Customers</h1><div class="sub">${update ? 'Records that are missing a detail or need a check before they join the customer list.' : 'Complete customer records. A customer is recognised by their contact number.'}</div></div>
       <div class="actions">${raw(!update && wide() ? '<button class="btn" type="button" id="gc-dl">Download for Google Contacts</button>' : '')}${raw(update ? '' : '<button class="btn" type="button" id="wa-all">WhatsApp the customers shown</button>')}${raw(!update && canEdit('customers') ? '<button class="btn primary" type="button" id="save-list">Save as a follow-up list</button>' : '')}</div></div>
@@ -242,8 +241,10 @@ export async function renderProfile(page, { id }) {
 
 const KIND_NAME = () => Object.fromEntries((state.messageKinds || []).map(([k, l]) => [k, l]));
 const starText = n => '★'.repeat(n) + '☆'.repeat(5 - n);
-export const feedbackCard = f => `<div class="fb-card"><div><span class="stars-s" aria-label="${f.stars} out of 5 stars">${starText(f.stars)}</span> <span class="muted small">${esc(fmtStamp(f.submitted_at))}</span></div>
+export const feedbackCard = f => `<div class="fb-item"><div><span class="stars-s" aria-label="${f.stars} out of 5 stars">${starText(f.stars)}</span> <span class="muted small">${esc(fmtStamp(f.submitted_at))}</span>
+    ${f.website_answer === 'yes' ? '<span class="pill green">OK for website</span>' : f.website_answer === 'no' ? '<span class="pill">Not for website</span>' : ''}</div>
   ${f.liked.length ? `<div class="small">Likes: ${esc(f.liked.join(', '))}</div>` : ''}${f.reasons.length ? `<div class="small">Bought: ${esc(f.reasons.join(', '))}</div>` : ''}
+  ${(f.changes || []).length ? `<div class="small">For the child: ${esc(f.changes.join(', '))}</div>` : ''}${f.child_age ? `<div class="small">Child's age: ${esc(f.child_age.replace('-', '–'))}</div>` : ''}
   ${f.comment ? `<blockquote>${esc(f.comment)}</blockquote>` : ''}</div>`;
 
 /** Saves the customers the filters show now as a follow-up list for the team. */
@@ -267,42 +268,13 @@ function saveListForm(page) {
   });
 }
 
-/** Customers → Feedback: the answers to the feedback links. */
-async function renderFeedback(page) {
-  const [f, sum] = await Promise.all([get('/api/feedback'), get('/api/customers/update-summary')]);
-  const n = v => Number(v || 0).toLocaleString('en-IN');
-  const bars = rows => { const max = Math.max(1, ...rows.map(r => r[1])); return `<div class="hbars">${rows.map(([l, v]) => `<div class="hbar"><span class="l">${esc(String(l))}</span><span class="b"><i data-w="${Math.round((v / max) * 100)}"></i></span><span class="v">${n(v)}</span></div>`).join('')}</div>`; };
-  page.innerHTML = `<div class="page-head"><div><h1>Customers</h1><div class="sub">What customers said through their feedback links.</div></div></div>
-    <nav class="tabs" aria-label="Customer lists"><a href="#/customers">Customers <span class="count">${n(sum.complete)}</span></a>
-      <a href="#/customers?view=update">Update needed <span class="count">${n(sum.needing + sum.sales_without_customer)}</span></a>
-      <a href="#/customers?view=next">Next book</a>
-      <a href="#/customers?view=feedback" aria-current="page">Feedback <span class="count">${n(f.answered)}</span></a></nav>
-    <div class="kpis"><div class="kpi"><span class="l">Answers</span><span class="v">${n(f.answered)}</span><span class="s">of ${n(f.sent)} links sent</span></div>
-      <div class="kpi"><span class="l">Average rating</span><span class="v">${f.average === null ? '—' : esc(f.average.toFixed(1)) + ' ★'}</span></div></div>
-    <div class="grid-3 top-gap"><section class="panel"><h2>Stars</h2>${bars(f.stars.map(([s, v]) => [s + ' ★', v]))}</section>
-      <section class="panel"><h2>What they like most</h2>${bars(f.liked)}</section>
-      <section class="panel"><h2>Why they bought</h2>${bars(f.reasons)}</section></div>
-    <section class="panel top-gap"><h2>Answers</h2>${table([
-      { label: 'Customer', cell: r => `<a href="#/customer/${r.customer_id}">${esc(r.customer_name)}</a><span class="sub">${esc(r.customer_code)} · ${esc(fmtStamp(r.submitted_at))}</span>` },
-      { label: 'Rating', cell: r => `<span class="stars-s" aria-label="${r.stars} out of 5">${starText(r.stars)}</span>` },
-      { label: 'Likes', cell: r => esc(r.liked.join(', ') || '—') },
-      { label: 'Bought', cell: r => esc(r.reasons.join(', ') || '—') },
-      { label: 'Comment', cell: r => esc(r.comment || '—') },
-    ], f.rows, { empty: 'No feedback yet', emptyHint: 'Send a feedback request from a customer\'s WhatsApp button, or from a follow-up list.' })}</section>`;
-  // Bar widths are set here, not inline in the markup (the page's security policy blocks inline styles).
-  page.querySelectorAll('i[data-w]').forEach(i => { i.style.width = i.dataset.w + '%'; });
-}
-
 /** Customers → Next book: for each step in Settings, the customers ready for the next book. */
 async function renderNextBook(page) {
   const [d, sum] = await Promise.all([get('/api/customers/next-book'), get('/api/customers/update-summary')]);
   const n = v => Number(v || 0).toLocaleString('en-IN');
   const month = new Date().toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
   page.innerHTML = `<div class="page-head"><div><h1>Customers</h1><div class="sub">Customers ready for their next book.</div></div></div>
-    <nav class="tabs" aria-label="Customer lists"><a href="#/customers">Customers <span class="count">${n(sum.complete)}</span></a>
-      <a href="#/customers?view=update">Update needed <span class="count">${n(sum.needing + sum.sales_without_customer)}</span></a>
-      <a href="#/customers?view=next" aria-current="page">Next book</a>
-      <a href="#/customers?view=feedback">Feedback <span class="count">${n(sum.feedback)}</span></a></nav>
+    ${customerTabs('next', sum)}
     <p class="muted">Customers who have the first book but not the next one, and have bought nothing for ${d.months} month${d.months === 1 ? '' : 's'}. Someone already in an open follow-up list made for the same step is not counted again. ${isAdmin() ? 'The steps are set in Settings → General → Next book.' : ''}</p>
     ${table([
       { label: 'Step', cell: x => `<b>${esc(x.from.name)}</b> → <b>${esc(x.to.name)}</b>` },
