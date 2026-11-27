@@ -1,4 +1,5 @@
 import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, fmtDate, fmtStamp, parseHash, wireFilters, qs, state, waLink, STATES, wide, canEdit, isAdmin } from '../core.js';
+import { checksList } from './delivery.js';
 import { whatsappDrawer } from './messages.js';
 import { openSale } from './sales.js';
 import { callsTable, callForm, wireCallActions } from './calls.js';
@@ -176,6 +177,7 @@ export async function renderProfile(page, { id }) {
       </div>
     </div>
     ${c.visits.length || isPlace ? `<section class="panel top-gap" id="p-visits"><h2>Visits</h2>${visitsTable(c.visits, { place: false, empty: 'No visits recorded for this place' })}</section>` : ''}
+    ${c.delivery_checks && c.delivery_checks.length ? `<section class="panel top-gap" id="p-delivery"><h2>Delivery check</h2>${checksList(c.delivery_checks)}</section>` : ''}
     <section class="panel top-gap" id="p-calls"><h2>Calls and follow-ups</h2>${callsTable(c.calls, { who: false, empty: 'No calls recorded for this person' })}</section>
     <div class="cols top-gap">
       <div><section class="panel"><h2>Feedback</h2>${c.feedback.length ? c.feedback.map(feedbackCard).join('') : '<p class="muted">No feedback yet. Send a feedback request with the WhatsApp button.</p>'}</section></div>

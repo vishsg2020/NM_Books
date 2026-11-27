@@ -88,6 +88,7 @@ module.exports = (app, { db, perm }) => {
     sale.stock = await db.all(`SELECT m.at, m.type, m.qty, b.name AS book_name, u.name AS user_name FROM stock_movements m
       JOIN books b ON b.id = m.book_id LEFT JOIN users u ON u.id = m.user_id WHERE m.sale_id = ? ORDER BY m.id`, [sale.id]);
     sale.history = await history(db, 'sale', sale.id);
+    sale.delivery_checks = await require('./delivery').checksFor(db, { saleId: sale.id });
     res.json(sale);
   });
 

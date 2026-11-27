@@ -57,6 +57,9 @@ async function renderGeneral(page) {
         <div class="field"><label for="sh-cour">Couriers, one per line: name | tracking page</label><textarea id="sh-cour" name="couriers" rows="3">${esc(state.shipping.couriers.map(c => `${c.name} | ${c.url}`).join('\n'))}</textarea>
           <div class="hint">The tracking page is sent in the Dispatched message.</div></div>
         <button class="btn primary" type="submit">Save label details</button></form></section>
+    <section class="panel"><h2>Delivery check</h2><p class="muted">Dispatch → Delivery check lists our own parcels (not Amazon or Flipkart) this many days after they are marked Dispatched, for the dispatch team to call.</p>
+      <form id="f-dc" novalidate><div class="field"><label for="dc-days">Days after dispatch</label><select id="dc-days" name="days">${raw(state.deliveryCheck.day_choices.map(n => `<option value="${n}" ${n === state.deliveryCheck.days ? 'selected' : ''}>${n} days</option>`).join(''))}</select></div>
+        <button class="btn primary" type="submit">Save</button></form></section>
     <section class="panel"><h2>Next book</h2><p class="muted">Customers → Next book lists customers who have the first book of a step but not the next one, and have bought nothing for the waiting time.</p>
       <form id="f-next" novalidate>
         <div class="field"><label for="nb-m">Waiting time after their last purchase</label><select id="nb-m" name="months">${raw([1, 2, 3, 6].map(m => `<option value="${m}" ${m === state.nextBook.months ? 'selected' : ''}>${m} month${m === 1 ? '' : 's'}</option>`).join(''))}</select></div>
@@ -77,6 +80,7 @@ async function renderGeneral(page) {
     const body = {}; for (const [k, val] of Object.entries(v)) { const [g, c] = k.split(':'); (body[g] = body[g] || {})[c] = val; }
     state.discounts = await api('PUT', '/api/settings/discounts', body); window.dispatchEvent(new Event('nm:changed')); toast('Discounts saved'); renderGeneral(page);
   });
+  onSubmit(page.querySelector('#f-dc'), async v => { state.deliveryCheck = await api('PUT', '/api/settings/delivery-check', { days: Number(v.days) }); toast('Delivery check saved'); renderGeneral(page); });
   onSubmit(page.querySelector('#f-ship'), async v => { state.shipping = await api('PUT', '/api/settings/shipping', v); toast('Label details saved'); renderGeneral(page); });
   // Next-book steps: a row per step, "first book → next book".
   const books = state.books.filter(b => b.active && b.sku !== 'OTHER').map(b => [b.sku, b.name]);

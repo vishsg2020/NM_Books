@@ -309,7 +309,8 @@ module.exports = (app, { db, perm, requireAdmin }) => {
       WHERE customer_id = ? AND submitted_at IS NOT NULL ORDER BY submitted_at DESC`, [c.id])).map(require('./followups').feedbackRow);
     const lists = await db.all(`SELECT l.id, l.name, l.closed_at, m.status FROM follow_up_members m JOIN follow_up_lists l ON l.id = m.list_id
       WHERE m.customer_id = ? ORDER BY l.id DESC`, [c.id]);
-    res.json({ ...c, sales, payments, books, calls, visits, messages, feedback, lists });
+    const delivery_checks = await require('./delivery').checksFor(db, { customerId: c.id });
+    res.json({ ...c, sales, payments, books, calls, visits, messages, feedback, lists, delivery_checks });
   });
 
   app.patch('/api/customers/:id', perm('customers'), async (req, res) => {

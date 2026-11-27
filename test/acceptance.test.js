@@ -919,7 +919,7 @@ test('roles & access: the Manager cannot reach users, roles or settings', async 
   // and keeps everything else it had
   for (const url of ['/api/sales', '/api/customers', '/api/calls', '/api/visits', '/api/inventory/movements', '/api/profit', '/api/dashboard/trends', '/api/users/salespeople']) assert.equal((await M.get(url)).status, 200, url);
   const me = (await M.get('/api/me')).data.user.perms;
-  assert.deepEqual(me, { dashboard: 'view', sales: 'edit', dispatch: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view', insights: 'view', prices: 'view' });
+  assert.deepEqual(me, { dashboard: 'view', sales: 'edit', dispatch: 'edit', delivery: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view', insights: 'view', prices: 'view' });
 });
 
 test('roles & access: the Admin changes the grid, it applies at once, View and Edit are kept apart; Reset to defaults', async () => {
@@ -1171,4 +1171,78 @@ test('Book Master: Malayalam title, author and links; Prices & links: coupons wi
   // who: the sales teams and Report Viewer; not Dispatch
   assert.equal((await D.get('/api/pricelist')).status, 403);
   assert.equal((await S.get('/api/pricelist')).status, 200);
+});
+
+test('delivery check: our own parcels a few days after dispatch; results, retries, needs action, settings and access', async () => {
+  ok(await A.post('/api/inventory/movements', { book_id: maam.id, type: 'Stock received', qty: 10, note: 'delivery check' }));
+  const order = async (name, phone) => {
+    const s = ok(await T.post('/api/sales', { customer_name: name, customer_phone: phone, address: 'House 9, Temple Road', state: 'Kerala', location: 'Thrissur', pin: '680001', payment_method: 'UPI', amount_received: 0, items: [{ book_id: maam.id, qty: 1 }] }));
+    ok(await D.post(`/api/sales/${s.id}/status`, { status: 'Dispatched', courier: 'DTDC', tracking_no: 'D7000' + s.id }), 200);
+    return s;
+  };
+  const sent = (id, day) => db.run(`UPDATE stock_movements SET at = ? WHERE sale_id = ? AND type = 'Stock dispatched'`, [day + 'T06:00:00.000Z', id]);
+  const called = (id, day) => db.run('UPDATE delivery_checks SET checked_at = ? WHERE sale_id = ?', [day + 'T06:00:00.000Z', id]);
+  const a = await order('Happy Parent', '9700000101'), b = await order('Quiet Parent', '9700000102'), c = await order('Waiting Parent', '9700000103');
+  const d = await order('Recent Parent', '9700000104'), amz = await order('Amazon Buyer', '9700000105');
+  for (const s of [a, b, c, amz]) await sent(s.id, '2026-11-10'); // today is 16 Nov: 6 days ago
+  await sent(d.id, '2026-11-14');
+  await db.run(`UPDATE sales SET platform = 'Amazon' WHERE id = ?`, [amz.id]);
+  let r = ok(await D.get('/api/delivery-checks'), 200);
+  const ids = x => x.map(o => o.id);
+  assert.equal(r.days, 4);
+  assert.ok([a, b, c].every(s => ids(r.call).includes(s.id)));
+  assert.ok(!ids(r.call).includes(d.id) && !ids(r.call).includes(amz.id)); // too recent; Amazon delivers its own
+  const row = r.call.find(o => o.id === a.id); assert.equal(row.sent_day, '2026-11-10'); assert.equal(row.days_since, 6); assert.equal(row.courier, 'DTDC');
+  // who: Dispatch, Manager and Admin record; Report Viewer reads; Tele-sales none
+  assert.equal((await T.get('/api/delivery-checks')).status, 403);
+  ok(await A.post('/api/users', { name: 'Dev Viewer', email: 'dv@x.in', password: pw, role: 'viewer' }));
+  const V = client(); await V.login('dv@x.in');
+  ok(await V.get('/api/delivery-checks'), 200);
+  assert.equal((await V.post('/api/delivery-checks', { sale_id: a.id, result: 'happy' })).status, 403);
+  // a note is needed for not happy, not delivered and returned
+  assert.equal((await D.post('/api/delivery-checks', { sale_id: a.id, result: 'not_happy' })).status, 400);
+  assert.equal((await D.post('/api/delivery-checks', { sale_id: a.id, result: 'lost' })).status, 400);
+  assert.equal((await D.post('/api/delivery-checks', { sale_id: amz.id, result: 'happy' })).status, 422);
+  // delivered and happy: the order is Delivered and leaves the list
+  ok(await D.post('/api/delivery-checks', { sale_id: a.id, result: 'happy' }));
+  assert.equal((await A.get(`/api/sales/${a.id}`)).data.status, 'Delivered');
+  assert.equal((await A.get(`/api/sales/${a.id}`)).data.delivery_checks[0].result, 'happy');
+  // no answer: back the next day; after three, Couldn't reach
+  ok(await D.post('/api/delivery-checks', { sale_id: b.id, result: 'no_answer' }));
+  await called(b.id, '2026-11-16');
+  r = (await D.get('/api/delivery-checks')).data;
+  assert.ok(!ids(r.call).includes(a.id) && !ids(r.call).includes(b.id));
+  await called(b.id, '2026-11-15');
+  r = (await D.get('/api/delivery-checks')).data;
+  assert.equal(r.call.find(o => o.id === b.id).tries, 1); assert.equal(r.counts.second, 1);
+  ok(await D.post('/api/delivery-checks', { sale_id: b.id, result: 'no_answer' }));
+  ok(await D.post('/api/delivery-checks', { sale_id: b.id, result: 'no_answer' }));
+  r = (await D.get('/api/delivery-checks')).data;
+  assert.ok(ids(r.unreachable).includes(b.id) && !ids(r.call).includes(b.id));
+  // not delivered: Needs action, and back on the list 2 days later; a later "happy" sorts it
+  ok(await D.post('/api/delivery-checks', { sale_id: c.id, result: 'not_delivered', note: 'India Post says out for delivery' }));
+  r = (await D.get('/api/delivery-checks')).data;
+  assert.ok(r.action.some(k => k.sale_id === c.id) && !ids(r.call).includes(c.id));
+  await called(c.id, '2026-11-14');
+  r = (await D.get('/api/delivery-checks')).data;
+  assert.ok(ids(r.call).includes(c.id));
+  ok(await M.post('/api/delivery-checks', { sale_id: c.id, result: 'not_happy', note: 'Cover torn' }));
+  r = (await D.get('/api/delivery-checks')).data;
+  assert.ok(!r.action.some(k => k.sale_id === c.id && k.result === 'not_delivered'));
+  const torn = r.action.find(k => k.sale_id === c.id && k.result === 'not_happy'); assert.ok(torn);
+  assert.equal((await D.post(`/api/delivery-checks/${torn.id}/sorted`, {})).status, 400);
+  ok(await D.post(`/api/delivery-checks/${torn.id}/sorted`, { note: 'Sent a new copy' }), 200);
+  r = (await D.get('/api/delivery-checks')).data;
+  assert.equal(r.action.filter(k => k.sale_id === c.id).length, 0);
+  assert.ok(r.checked.length >= 6); assert.ok(r.counts.checked >= 2 && r.counts.happy >= 1);
+  // the customer page shows the calls
+  const cust = (await A.get(`/api/customers/${(await A.get(`/api/sales/${c.id}`)).data.customer_id}`)).data;
+  assert.ok(cust.delivery_checks.some(k => k.result === 'not_happy'));
+  // Settings: days after dispatch (Admin only)
+  assert.equal((await M.send('PUT', '/api/settings/delivery-check', { days: 7 })).status, 403);
+  assert.equal((await A.send('PUT', '/api/settings/delivery-check', { days: 9 })).status, 400);
+  ok(await A.send('PUT', '/api/settings/delivery-check', { days: 2 }), 200);
+  assert.ok(ids((await D.get('/api/delivery-checks')).data.call).includes(d.id));
+  ok(await A.send('PUT', '/api/settings/delivery-check', { days: 4 }), 200);
+  assert.equal((await D.get('/api/settings/lists')).data.delivery_check.days, 4);
 });

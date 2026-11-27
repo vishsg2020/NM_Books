@@ -20,6 +20,7 @@ const AREAS = [
   { key: 'dashboard', name: 'Dashboard', note: 'figures for each role', own: ['telesales', 'online', 'onsite'] },
   { key: 'sales', name: 'Sales & payments', note: 'record a sale, payments, cancel', own: ['telesales', 'online', 'onsite', 'dispatch'] },
   { key: 'dispatch', name: 'Dispatch', note: 'order status (packing → delivered), daily dispatch report' },
+  { key: 'delivery', name: 'Delivery check', note: 'call customers after dispatch: did the books arrive, are they happy' },
   { key: 'customers', name: 'Customers', note: 'list, edit, Update needed' },
   { key: 'webimport', name: 'Website orders', note: 'monthly website file upload' },
   { key: 'calls', name: 'Calls', note: 'calls, follow-ups, tele-sales report' },
@@ -32,14 +33,14 @@ const AREAS = [
   { key: 'prices', name: 'Prices & links', note: 'prices on every platform, offers and coupons, links to share' },
 ];
 // Today's access (before roles could be changed), plus the Report Viewer; Insights (27 Nov 2026) for Manager, Tele-sales
-// and Report Viewer. Admin always has everything.
+// and Report Viewer; Delivery check (27 Nov 2026) for Manager and Dispatch, Report Viewer to read. Admin always has everything.
 const DEFAULTS = {
-  manager: { dashboard: 'view', sales: 'edit', dispatch: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view', insights: 'view', prices: 'view' },
+  manager: { dashboard: 'view', sales: 'edit', dispatch: 'edit', delivery: 'edit', customers: 'edit', webimport: 'edit', calls: 'edit', visits: 'edit', books: 'view', stock: 'view', profit: 'view', reports: 'view', insights: 'view', prices: 'view' },
   telesales: { dashboard: 'view', sales: 'edit', customers: 'edit', calls: 'edit', books: 'view', insights: 'view', prices: 'view' },
   online: { dashboard: 'view', sales: 'edit', customers: 'edit', webimport: 'edit', books: 'view', prices: 'view' },
   onsite: { dashboard: 'view', sales: 'edit', customers: 'edit', visits: 'edit', books: 'view', prices: 'view' },
-  dispatch: { dashboard: 'view', sales: 'view', dispatch: 'edit', books: 'view' },
-  viewer: { dashboard: 'view', reports: 'view', insights: 'view', prices: 'view' },
+  dispatch: { dashboard: 'view', sales: 'view', dispatch: 'edit', delivery: 'edit', books: 'view' },
+  viewer: { dashboard: 'view', reports: 'view', insights: 'view', prices: 'view', delivery: 'view' },
 };
 const EDITABLE = ['manager', 'telesales', 'online', 'onsite', 'dispatch', 'viewer'];
 

@@ -233,7 +233,7 @@ export const wide = () => ['admin', 'manager', 'viewer'].includes(state.me?.role
 
 export async function loadLookups() {
   state.books = await get('/api/books');
-  const st = await get('/api/settings/lists'); state.lists = st.lists; state.locked = st.locked; state.listNames = st.names; state.charges = st.charges || {}; state.discounts = st.discounts || {}; state.discountGroups = st.discount_groups || []; state.discountChannels = st.discount_channels || []; state.themes = st.themes || []; state.messages = st.messages || { templates: {} }; state.messageKinds = st.message_kinds || []; state.messageFields = st.message_fields || []; state.orderKinds = st.order_kinds || []; state.shipping = st.shipping || { couriers: [] }; state.shippingFields = st.shipping_fields || []; state.nextBook = st.next_book || { months: 1, steps: [] }; applyTheme(st.theme);
+  const st = await get('/api/settings/lists'); state.lists = st.lists; state.locked = st.locked; state.listNames = st.names; state.charges = st.charges || {}; state.discounts = st.discounts || {}; state.discountGroups = st.discount_groups || []; state.discountChannels = st.discount_channels || []; state.themes = st.themes || []; state.messages = st.messages || { templates: {} }; state.messageKinds = st.message_kinds || []; state.messageFields = st.message_fields || []; state.orderKinds = st.order_kinds || []; state.shipping = st.shipping || { couriers: [] }; state.shippingFields = st.shipping_fields || []; state.nextBook = st.next_book || { months: 1, steps: [] }; state.deliveryCheck = st.delivery_check || { days: 4, day_choices: [4] }; applyTheme(st.theme);
   state.people = wide() ? await get('/api/users/salespeople') : [];
 }
 /** Debounces a handler (search boxes). */

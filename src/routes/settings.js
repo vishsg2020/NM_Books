@@ -13,7 +13,8 @@ module.exports = (app, { db, perm, requireAdmin }) => {
     res.json({ lists: await S.getLists(db), locked: S.LOCKED, names: S.LIST_NAMES, charges: await S.getCharges(db),
       discounts: await P.getDiscounts(db), discount_groups: P.GROUPS, discount_channels: P.CHANNELS, theme: await getTheme(db), themes: THEMES,
       messages: await S.getMessages(db), message_kinds: S.MESSAGE_KINDS, message_fields: S.MESSAGE_FIELDS, order_kinds: S.ORDER_KINDS,
-      shipping: await S.getShipping(db), shipping_fields: S.SHIPPING_FIELDS, next_book: await S.getNextBook(db) });
+      shipping: await S.getShipping(db), shipping_fields: S.SHIPPING_FIELDS, next_book: await S.getNextBook(db),
+      delivery_check: await require('./delivery').getConfig(db) });
   });
 
   app.put('/api/settings/shipping', requireAdmin, async (req, res) => {

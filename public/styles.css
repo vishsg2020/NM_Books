@@ -700,3 +700,6 @@ ul.plain li { padding: 3px 0; }
 .cp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .cp code { font: 700 16px ui-monospace, monospace; color: var(--green); }
 .top-gap-s { margin-top: 8px; margin-bottom: 0; }
+
+/* Delivery check */
+fieldset.msg-types { border: 0; padding: 0; margin: 0 0 12px; min-width: 0; }

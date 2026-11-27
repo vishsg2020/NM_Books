@@ -71,6 +71,7 @@ function createApp(db) {
   require('./routes/access')(app, ctx);
   require('./routes/insights')(app, ctx);
   require('./routes/pricelist')(app, ctx);
+  require('./routes/delivery')(app, ctx);
 
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Not found')));
   // Code and pages are re-checked on every load, so an update shows up at once; fonts and images can be kept.

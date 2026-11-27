@@ -1,4 +1,5 @@
 import { api, get, esc, html, raw, inr, pill, table, drawer, onSubmit, options, toast, can, canView, waLink, fmtDate, fmtStamp, parseHash, setQuery, wireFilters, qs, state, myChannel, todayLocal, drawerGeneration, reasonBox, wide, canEdit, isAdmin } from '../core.js';
+import { checksList } from './delivery.js';
 import { saleForm } from './sale-form.js';
 import { sendOrderMessage, orderMessage, logOrderMessage } from './messages.js';
 
@@ -115,6 +116,7 @@ export async function openSale(id, after = () => {}, opts = {}) {
           <div class="field"><label for="sh-t">Tracking number</label><input id="sh-t" name="tracking_no" maxlength="40" autocomplete="off" value="${esc(s.tracking_no || '')}" placeholder="Type or scan"></div>
           <div class="field"><label class="check"><input type="checkbox" name="gift_pack" ${s.gift_pack ? 'checked' : ''}> Gift pack</label><button class="btn small" type="submit">Save</button></div>
         </form></details>` : ''}
+      ${s.delivery_checks && s.delivery_checks.length ? `<h3>Delivery check</h3>${checksList(s.delivery_checks.map(k => ({ ...k, sale_no: '' })))}` : ''}
       <h3>Books</h3>
       ${table([
         { label: 'Book', cell: i => `${esc(i.book_name)}<span class="sub">${esc(i.sku)}</span>` },

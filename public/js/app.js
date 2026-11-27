@@ -14,6 +14,7 @@ import * as users from './pages/users.js';
 import * as followups from './pages/followups.js';
 import * as insights from './pages/insights.js';
 import * as pricelist from './pages/pricelist.js';
+import * as delivery from './pages/delivery.js';
 
 const app = document.getElementById('app');
 // Each menu item shows when the role can view one of its areas (Settings → Roles & access). Settings is Admin only.
@@ -25,8 +26,11 @@ const NAV = [
     { path: 'customers', label: 'Customers', area: 'customers' },
     { path: 'followups', label: 'Follow-up lists', area: 'customers' },
     { path: 'prices', label: 'Prices & links', area: 'prices' },
-    { path: 'dispatch', label: 'Dispatch report', area: ['dispatch', 'reports'] },
     { path: 'webimport', label: 'Website orders', area: 'webimport' },
+  ] },
+  { group: 'Dispatch', items: [
+    { path: 'delivery', label: 'Delivery check', area: 'delivery' },
+    { path: 'dispatch', label: 'Dispatch report', area: ['dispatch', 'reports'] },
   ] },
   { group: 'Tele-sales', items: [
     { path: 'calls', label: 'Calls', area: 'calls' },
@@ -49,7 +53,7 @@ const showItem = i => (i.admin ? isAdmin() : canView(i.area)) && (!i.only || sta
 
 // The area each page belongs to. `edits`: the page has something to change, so View alone gets the view-only note.
 const PAGE_AREA = {
-  dashboard: { area: 'dashboard' }, sales: { area: 'sales', edits: true }, customers: { area: 'customers', edits: true }, customer: { area: 'customers', edits: true }, followups: { area: 'customers', edits: true }, insights: { area: 'insights' }, prices: { area: 'prices' },
+  dashboard: { area: 'dashboard' }, sales: { area: 'sales', edits: true }, customers: { area: 'customers', edits: true }, customer: { area: 'customers', edits: true }, followups: { area: 'customers', edits: true }, insights: { area: 'insights' }, prices: { area: 'prices' }, delivery: { area: 'delivery', edits: true },
   dispatch: { area: ['dispatch', 'reports'], edits: 'dispatch' }, webimport: { area: 'webimport', edits: true }, calls: { area: 'calls', edits: true },
   callreport: { area: ['calls', 'reports'] }, visits: { area: 'visits', edits: true }, books: { area: 'books', edits: true },
   inventory: { area: 'stock', edits: true }, profit: { area: 'profit', edits: true }, settings: { admin: true }, users: { admin: true },
@@ -63,6 +67,7 @@ const ROUTES = {
   followups: followups.render,
   insights: insights.render,
   prices: pricelist.render,
+  delivery: delivery.render,
   calls: calls.renderList,
   visits: visits.renderList,
   profit: profit.render,
