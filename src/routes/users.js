@@ -8,7 +8,7 @@ const PUBLIC = 'u.id, u.name, u.email, u.role, u.active, u.created_at';
 
 module.exports = (app, { db, access, requireAdmin, requireWide }) => {
   // The signed-in user, with what their role may see (View) and change (Edit) in each area.
-  app.get('/api/me', async (req, res) => res.json({ user: { ...req.user, perms: await access.permsFor(req.user.role) } }));
+  app.get('/api/me', async (req, res) => res.json({ user: { ...req.user, perms: await access.permsFor(req.user.role), own: await access.ownFor(req.user.role) } }));
 
   app.post('/api/me/password', async (req, res) => {
     const u = await db.get('SELECT * FROM users WHERE id = ?', [req.user.id]);
@@ -25,7 +25,36 @@ module.exports = (app, { db, access, requireAdmin, requireWide }) => {
   });
 
   app.get('/api/users', requireAdmin, async (_req, res) => {
-    res.json(await db.all(`SELECT ${PUBLIC} FROM users u ORDER BY u.active DESC, u.role, u.name`));
+    res.json(await db.all(`SELECT ${PUBLIC}, (SELECT COUNT(*) FROM sales s WHERE s.salesperson_id = u.id) AS orders,
+        (SELECT string_agg(a.after_json::json->>'old_name', ', ' ORDER BY a.id) FROM audit_events a WHERE a.entity = 'user' AND a.entity_id = u.id AND a.action = 'old_name_linked') AS old_names
+      FROM users u ORDER BY u.active DESC, u.role, u.name`));
+  });
+
+  // Old order-sheet names: the inactive placeholders the imports made for each name in the sheets ("Megha", "Ajil"…).
+  // Linking one to a login moves its orders and calls to that login, so they count as theirs ("Own only").
+  // "Not recorded" is never offered.
+  const LEGACY = `u.active = 0 AND u.email LIKE '%@imported.invalid' AND u.name <> 'Not recorded'`;
+  app.get('/api/users/old-names', requireAdmin, async (_req, res) => {
+    res.json(await db.all(`SELECT u.id, u.name, u.role,
+        (SELECT COUNT(*) FROM sales s WHERE s.salesperson_id = u.id) AS orders, (SELECT COUNT(*) FROM calls k WHERE k.salesperson_id = u.id) AS calls
+      FROM users u WHERE ${LEGACY} AND (EXISTS (SELECT 1 FROM sales s WHERE s.salesperson_id = u.id) OR EXISTS (SELECT 1 FROM calls k WHERE k.salesperson_id = u.id))
+      ORDER BY u.name`));
+  });
+  app.post('/api/users/:id/link-old-name', requireAdmin, async (req, res) => {
+    const to = await db.get(`SELECT ${PUBLIC} FROM users u WHERE id = ?`, [idParam(req.params.id)]);
+    if (!to) throw notFound('User');
+    if (/@imported\.invalid$/i.test(to.email)) throw bad('Choose a real login to link the old name to');
+    const from = await db.get(`SELECT u.id, u.name FROM users u WHERE u.id = ? AND ${LEGACY}`, [idParam(req.body.old_id)]);
+    if (!from) throw bad('Choose one of the old order-sheet names', { field: 'Old order-sheet name' });
+    const moved = await db.tx(async t => {
+      const s = await t.run('UPDATE sales SET salesperson_id = ? WHERE salesperson_id = ?', [to.id, from.id]);
+      const k = await t.run('UPDATE calls SET salesperson_id = ? WHERE salesperson_id = ?', [to.id, from.id]);
+      const out = { orders: s.rowCount, calls: k.rowCount };
+      await audit(t, req.user, 'user', to.id, 'old_name_linked', null, { old_name: from.name, ...out });
+      await audit(t, req.user, 'user', from.id, 'linked_to_login', null, { login: to.name, email: to.email, ...out });
+      return out;
+    });
+    res.json({ ok: true, old_name: from.name, ...moved });
   });
 
   app.post('/api/users', requireAdmin, async (req, res) => {

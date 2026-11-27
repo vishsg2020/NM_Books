@@ -373,3 +373,66 @@ test('delivery check: our own parcels a few days after dispatch; results, retrie
   ok(await A.send('PUT', '/api/settings/delivery-check', { days: 4 }), 200);
   assert.equal((await D.get('/api/settings/lists')).data.delivery_check.days, 4);
 });
+
+test('own only (Tele-sales): their own orders and customers; a full number finds others; Admin can switch to the whole channel; old order-sheet names', async () => {
+  ok(await A.post('/api/users', { name: 'Tara Tele', email: 't2@x.in', password: pw, role: 'telesales' }));
+  const T2 = client(); await T2.login('t2@x.in');
+  assert.deepEqual((await T.get('/api/me')).data.user.own, { sales: true, customers: true });
+  assert.deepEqual((await M.get('/api/me')).data.user.own, {});
+  const sell = (c, name, phone) => c.post('/api/sales', { customer_name: name, customer_phone: phone, address: 'House 3, Lake Road', state: 'Kerala', location: 'Kollam', pin: '691001', items: [{ book_id: maam.id, qty: 1 }] });
+  const mine = ok(await sell(T, 'Mine Customer', '9811111102'));
+  const theirs = ok(await sell(T2, 'Their Customer', '9811111101'));
+  // sales: only the orders they made
+  const tSales = (await T.get('/api/sales')).data.rows.map(s => s.id);
+  assert.ok(tSales.includes(mine.id) && !tSales.includes(theirs.id));
+  assert.equal((await T.get(`/api/sales/${theirs.id}`)).status, 403);
+  assert.equal((await T.post(`/api/sales/${theirs.id}/payments`, { amount: 10, method: 'UPI' })).status, 403);
+  assert.ok((await M.get('/api/sales')).data.rows.some(s => s.id === theirs.id)); // the Manager sees everyone's
+  // customers: only their own; a full number finds someone else's, with the basics only
+  const names = async (c, q = '') => (await c.get('/api/customers?kind=all' + q)).data.rows.map(r => r.name);
+  assert.ok((await names(T)).includes('Mine Customer')); assert.ok(!(await names(T)).includes('Their Customer'));
+  assert.equal((await T.get(`/api/customers/${theirs.customer_id}`)).status, 403);
+  assert.equal((await T.patch(`/api/customers/${theirs.customer_id}`, { contact_person: 'X' })).status, 403);
+  let r = (await T.get('/api/customers?q=9811111101')).data;
+  assert.equal(r.own, true); assert.equal(r.rows.length, 0);
+  assert.deepEqual(r.found.map(f => [f.name, f.last_with]), [['Their Customer', 'Tara Tele']]);
+  assert.equal(r.found[0].address, undefined); // the basics only
+  assert.equal((await T.get('/api/customers?q=98111111')).data.found.length, 0); // not a full number
+  // a call makes them theirs too
+  ok(await T.post('/api/calls', { phone: '9811111101', status: 'Answered', outcome: 'Interested' }));
+  assert.ok((await names(T)).includes('Their Customer'));
+  ok(await T.get(`/api/customers/${theirs.customer_id}`), 200);
+  // follow-up lists: their own
+  const list = ok(await T2.post('/api/followups', { name: 'Tara list', filters: { q: '9811111101' } }));
+  assert.ok(!(await T.get('/api/followups')).data.lists.some(l => l.id === list.id));
+  assert.equal((await T.get(`/api/followups/${list.id}`)).status, 403);
+  assert.equal((await T.post(`/api/followups/${list.id}/close`)).status, 403);
+  // Admin: Whole channel for customers; only Tele-sales Sales and Customers can be set
+  const acc = (await A.get('/api/access')).data;
+  assert.deepEqual(acc.scopes, { telesales: { sales: 'own', customers: 'own' } });
+  assert.equal((await A.send('PUT', '/api/access', { grid: acc.grid, scopes: { online: { sales: 'own' } } })).status, 400);
+  assert.equal((await A.send('PUT', '/api/access', { grid: acc.grid, scopes: { telesales: { sales: 'mine' } } })).status, 400);
+  assert.equal((await M.send('PUT', '/api/access', { grid: acc.grid, scopes: { telesales: { customers: 'all' } } })).status, 403);
+  ok(await A.send('PUT', '/api/access', { grid: acc.grid, scopes: { telesales: { sales: 'own', customers: 'all' } }, reason: 'Team shares customers' }), 200);
+  const log = await db.get(`SELECT after_json FROM audit_events WHERE entity = 'settings' AND action = 'role_access' ORDER BY id DESC LIMIT 1`);
+  assert.deepEqual(JSON.parse(log.after_json), { 'Tele-sales · Customers (whose)': 'all' });
+  await new Promise(res => setTimeout(res, 50));
+  assert.deepEqual((await T.get('/api/me')).data.user.own, { sales: true, customers: false });
+  r = (await T.get('/api/customers?q=9811111101')).data; assert.equal(r.own, false); assert.equal(r.rows.length, 1);
+  assert.ok(!(await T.get('/api/sales')).data.rows.some(s => s.id === theirs.id)); // sales still own only
+  ok(await A.send('PUT', '/api/access', { grid: acc.grid, scopes: { telesales: { sales: 'own', customers: 'own' } } }), 200);
+  // old order-sheet names: link one to a login; its orders and calls become theirs
+  const old = await db.get(`INSERT INTO users (name, email, password_hash, role, active) VALUES ('Megha', 'megha@imported.invalid', 'x', 'telesales', 0) RETURNING id`);
+  await db.run('UPDATE sales SET salesperson_id = ? WHERE id = ?', [old.id, theirs.id]);
+  const olds = ok(await A.get('/api/users/old-names'), 200);
+  assert.deepEqual(olds.map(o => [o.name, o.orders]), [['Megha', 1]]);
+  assert.equal((await M.get('/api/users/old-names')).status, 403);
+  const tid = (await A.get('/api/users')).data.find(u => u.email === 't@x.in').id;
+  assert.equal((await A.post(`/api/users/${old.id}/link-old-name`, { old_id: old.id })).status, 400); // not a real login
+  assert.equal((await A.post(`/api/users/${tid}/link-old-name`, { old_id: 999999 })).status, 400);
+  const link = ok(await A.post(`/api/users/${tid}/link-old-name`, { old_id: old.id }), 200);
+  assert.equal(link.orders, 1);
+  ok(await T.get(`/api/sales/${theirs.id}`), 200);
+  assert.equal((await A.get('/api/users/old-names')).data.length, 0);
+  assert.equal((await A.get('/api/users')).data.find(u => u.id === tid).old_names, 'Megha');
+});

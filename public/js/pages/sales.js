@@ -12,7 +12,7 @@ const sellers = () => canEdit('sales') && state.me.role !== 'dispatch';
 export async function renderList(page, { query }) {
   const wideRole = wide(); const dispatch = can('dispatch');
   page.innerHTML = html`<div class="page-head"><div><h1>${dispatch ? 'Orders' : 'Sales'}</h1>
-      <div class="sub">${dispatch ? 'Orders to pack, dispatch and deliver.' : myChannel() ? `${myChannel()} sales and orders.` : 'Every sale across Tele-sales, Online and Onsite.'}</div></div>
+      <div class="sub">${dispatch ? 'Orders to pack, dispatch and deliver.' : state.me.own?.sales ? `The ${myChannel()} orders you made.` : myChannel() ? `${myChannel()} sales and orders.` : 'Every sale across Tele-sales, Online and Onsite.'}</div></div>
     <div class="actions">${raw(canView('dispatch') ? '<button class="btn" type="button" id="print-labels">Print labels</button>' : '')}${raw(sellers() ? `<button class="btn primary" type="button" id="add-s">${myChannel() === 'Onsite' ? 'Record a visit' : 'Record a sale'}</button>` : '')}</div></div>
     <form class="filters" id="s-filters">
       <div class="field grow"><label for="sf-q">Search</label><input id="sf-q" name="q" type="search" placeholder="Customer, phone, sale or order number" value="${query.q}"></div>

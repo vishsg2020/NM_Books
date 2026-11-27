@@ -26,16 +26,22 @@ const LIST = `s.id, s.sale_no, s.sale_date, s.channel, s.status, s.customer_id, 
   (SELECT COALESCE(SUM(i.qty),0) FROM sale_items i WHERE i.sale_id = s.id) AS total_qty,
   (SELECT string_agg(b.name || ' × ' || i.qty, ', ' ORDER BY i.id) FROM sale_items i JOIN books b ON b.id = i.book_id WHERE i.sale_id = s.id) AS books`;
 
-module.exports = (app, { db, perm }) => {
-  /** Which sales a role may see: channel roles their own channel, Dispatch the orders that are shipped. */
-  function scope(user, where, p) {
+module.exports = (app, { db, perm, access }) => {
+  /**
+   * Which sales a role may see: channel roles their own channel, Dispatch the orders that are shipped. With "Own only"
+   * (Roles & access, Tele-sales), only the orders where they are the sales person or that they entered.
+   */
+  function scope(user, where, p, own) {
     if (CHANNEL_OF[user.role]) { where.push('s.channel = @scope_channel'); p.scope_channel = CHANNEL_OF[user.role]; }
+    if (own) { where.push('(s.salesperson_id = @scope_me OR s.created_by = @scope_me)'); p.scope_me = user.id; }
     if (user.role === 'dispatch') where.push(`s.status <> 'Completed'`);
   }
-  function assertCanSee(user, sale) {
+  function assertCanSee(user, sale, own) {
     if (CHANNEL_OF[user.role] && sale.channel !== CHANNEL_OF[user.role]) throw forbidden();
+    if (own && sale.salesperson_id !== user.id && sale.created_by !== user.id) throw forbidden();
     if (user.role === 'dispatch' && sale.status === 'Completed') throw forbidden();
   }
+  const ownSales = user => (access ? access.isOwn(user, 'sales') : false);
 
   async function load(id) {
     const sale = await db.get(`SELECT s.*, (s.total_amount - s.amount_received) AS balance, u.name AS salesperson_name, cb.name AS created_by_name, c.code AS customer_code,
@@ -54,7 +60,7 @@ module.exports = (app, { db, perm }) => {
 
   app.get('/api/sales', perm('sales'), async (req, res) => {
     const q = req.query; const where = []; const p = {};
-    scope(req.user, where, p);
+    scope(req.user, where, p, await ownSales(req.user));
     if (q.channel) { where.push('s.channel = @channel'); p.channel = oneOf(q.channel, CHANNELS, { name: 'Channel' }); }
     if (q.status === 'open') where.push(`s.status IN ('Confirmed','Packing','Ready to Dispatch')`);
     else if (q.status) { where.push('s.status = @status'); p.status = oneOf(q.status, STATUSES, { name: 'Status' }); }
@@ -84,7 +90,7 @@ module.exports = (app, { db, perm }) => {
   app.get('/api/sales/:id', perm('sales'), async (req, res) => {
     const sale = await load(idParam(req.params.id));
     if (!sale) throw notFound('Sale');
-    assertCanSee(req.user, sale);
+    assertCanSee(req.user, sale, await ownSales(req.user));
     sale.stock = await db.all(`SELECT m.at, m.type, m.qty, b.name AS book_name, u.name AS user_name FROM stock_movements m
       JOIN books b ON b.id = m.book_id LEFT JOIN users u ON u.id = m.user_id WHERE m.sale_id = ? ORDER BY m.id`, [sale.id]);
     sale.history = await history(db, 'sale', sale.id);
@@ -102,10 +108,11 @@ module.exports = (app, { db, perm }) => {
     if (paidOn > today()) throw bad('The payment date cannot be in the future', { field: 'Payment date' });
     const note = str(b.note, { name: 'Note', max: 300 });
     const id = idParam(req.params.id);
+    const own = await ownSales(req.user);
     await db.tx(async t => {
       const s = await t.get('SELECT * FROM sales WHERE id = ? FOR UPDATE', [id]);
       if (!s) throw notFound('Sale');
-      assertCanSee(req.user, s);
+      assertCanSee(req.user, s, own);
       if (s.status === 'Cancelled') throw unprocessable('This order is cancelled, so no payment can be recorded');
       const balance = s.total_amount - s.amount_received;
       if (amount > balance) throw bad(balance ? `Only ${inr(balance)} is outstanding on this order` : 'This order is already fully paid', { field: 'Amount' });
@@ -179,10 +186,11 @@ module.exports = (app, { db, perm }) => {
   app.post('/api/sales/:id/cancel', perm('sales'), async (req, res) => {
     const reason = str(req.body.reason, { required: true, name: 'Reason', max: 300 });
     const id = idParam(req.params.id);
+    const own = await ownSales(req.user);
     await db.tx(async t => {
       const s = await t.get('SELECT * FROM sales WHERE id = ? FOR UPDATE', [id]);
       if (!s) throw notFound('Sale');
-      assertCanSee(req.user, s);
+      assertCanSee(req.user, s, own);
       if (s.status === 'Cancelled') return;
       if (s.import_ref) throw unprocessable('This order was brought in from the old order sheet and is kept as history');
       if (!['Confirmed', 'Packing', 'Ready to Dispatch'].includes(s.status)) {

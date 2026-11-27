@@ -59,7 +59,7 @@ export async function renderList(page, { query }) {
       <div class="field"><label for="cf-ns">Not bought since</label><select id="cf-ns" name="not_since">${options(NOT_SINCE, query.not_since, 'No condition')}</select></div>
       <div class="field"><label for="cf-so">Sort by</label><select id="cf-so" name="sort">${options(SORT, query.sort, 'Last purchase, newest first')}</select></div>`)}
       <button class="btn" type="button" data-clear>Clear filters</button>
-    </form><p class="result-count" id="c-count"></p><div id="c-list"></div>
+    </form><div id="c-own"></div><p class="result-count" id="c-count"></p><div id="c-list"></div>
     ${raw(update ? `<section class="panel top-gap" id="dup-sec"><h2>Possible duplicates</h2><p class="muted">The same name and the same PIN on two records: usually one person who gave two numbers. Merging keeps the record with more orders, moves every order, call and visit to it, and keeps the other number as a second number.</p><div id="dup-list"><p class="muted">Loading…</p></div></section>
       <section class="panel top-gap" id="nocust-sec"><h2>Sales with no customer record</h2><p class="muted">These orders were saved without a contact number, so they belong to no customer. Open one and use <strong>Edit sale</strong> (Admin) to add the number: the order then joins that customer.</p>${table([
         { label: 'Sale', cell: x => `<a href="#/sales?open=${x.id}">${esc(x.sale_no)}</a><span class="sub">${esc(fmtDate(x.sale_date))}</span>` },
@@ -93,6 +93,7 @@ export async function renderList(page, { query }) {
   });
   const load = async () => {
     const q = parseHash().query; const r = await get('/api/customers' + qs(q)); shown = r.rows;
+    ownBox(page.querySelector('#c-own'), r, q, load);
     const word = update ? 'record' : 'customer';
     page.querySelector('#c-count').textContent = r.truncated ? `${r.total.toLocaleString('en-IN')} ${word}s match. Showing the first 500${update ? '' : '; the Google Contacts download includes all of them'}.` : `${r.rows.length} ${word}${r.rows.length === 1 ? '' : 's'}${!update && q.q ? ' (the search also looks in Update needed)' : ''}`;
     const any = Object.keys(q).filter(k => k !== 'view').length;
@@ -110,10 +111,32 @@ export async function renderList(page, { query }) {
         : (waLink(c.phone) ? `<button class="btn small" type="button" data-wa="${c.id}">WhatsApp</button>` : '')) },
     ], r.rows, { empty: update ? (any ? 'No records match these filters' : 'Nothing needs an update') : (any ? 'No customers match these filters' : 'No customers yet'),
       emptyHint: update ? '' : any ? 'Clear the filters to see everyone.' : 'Customers appear here when a sale with a contact number is recorded.' });
+    if (r.found && r.found.length && !r.rows.length) { list.innerHTML = ''; page.querySelector('#c-count').textContent = ''; }
   };
   wireFilters(page.querySelector('#c-filters'), load);
   await load();
   if (update) await loadDuplicates(page);
+}
+
+/**
+ * "Own only" (Tele-sales): a note on whose customers these are, and a customer found by their full number who is with
+ * another team member (the basics only, with Log a call and Record a sale).
+ */
+function ownBox(box, r, q, reload) {
+  if (!r.own) { box.innerHTML = ''; return; }
+  const digits = String(q.q || '').replace(/\D/g, '');
+  box.innerHTML = `<div class="notice info"><b>Your customers:</b> people you sold to, called, or put in one of your follow-up lists. To find someone else's customer, type their full 10-digit number in Search.</div>
+    ${r.found.length ? `<section class="panel"><h2>Found by number</h2><p class="muted small">With another team member. You see only the basics; logging a call or recording a sale makes them yours too.</p>
+      ${table([
+        { label: 'Customer', cell: c => `<b>${esc(c.name)}</b><span class="sub">${esc(c.phone || '')}${c.kind === 'Lead' ? ' · Lead' : ''}</span>` },
+        { label: 'District', cell: c => esc(c.location || '—') },
+        { label: 'Last order', cell: c => (c.last_purchase_date ? `${esc(fmtDate(c.last_purchase_date))}${c.last_with ? `<span class="sub">with ${esc(c.last_with)}</span>` : ''}` : '—') },
+        { label: 'Actions', cls: 'cell-actions', cell: c => `${canEdit('calls') ? `<button class="btn small" type="button" data-found-call="${c.id}">Log a call</button>` : ''}${canEdit('sales') && c.phone ? `<a class="btn small primary" href="#/sales?new=1&phone=${encodeURIComponent(c.phone)}">Record a sale</a>` : ''}` },
+      ], r.found)}</section>` : digits.length >= 10 && !r.rows.length ? '<p class="muted small">No customer has this number yet. Log a call to save them as a lead.</p>' : ''}`;
+  box.querySelectorAll('[data-found-call]').forEach(b => b.addEventListener('click', () => {
+    const c = r.found.find(x => String(x.id) === b.dataset.foundCall);
+    callForm({ phone: c.phone, name: c.name, after: reload });
+  }));
 }
 
 /** The "Possible duplicates" section: pairs with a Merge button (Admin) and "Not the same person". */

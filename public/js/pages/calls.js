@@ -137,11 +137,12 @@ export function callForm({ phone = '', name = '', after = () => {} } = {}) {
           if ($('#k-phone').value !== ph) return;
           if (!c) { box.innerHTML = '<div class="notice info">New number. It is saved as a lead and becomes a customer with the first purchase.</div>'; return; }
           if (!$('#k-name').value && c.name !== 'Name not known') $('#k-name').value = c.name;
-          const full = await get(`/api/customers/${c.id}`);
+          // A customer of another team member ("Own only"): the basics from the lookup, without their history.
+          const full = await get(`/api/customers/${c.id}`).catch(() => ({ books: [], calls: [], other: true }));
           const last = full.calls.slice(0, 3).map(k => `<li>${esc(fmtDT(k.called_at))} · ${esc(k.outcome || k.status)}${k.remarks ? ' · ' + esc(k.remarks) : ''} <span class="muted">${esc(k.salesperson_name)}</span></li>`).join('');
           box.innerHTML = `<div class="notice info"><strong>${esc(c.name)}</strong> · ${c.kind === 'Lead' ? 'Lead, no purchase yet' : `${c.total_orders} order${c.total_orders === 1 ? '' : 's'}, ${esc(inr(c.total_purchase_amount))}${c.last_purchase_date ? ', last on ' + esc(fmtDate(c.last_purchase_date)) : ''}`}${c.outstanding_amount ? ` · <strong>${esc(inr(c.outstanding_amount))} outstanding</strong>` : ''}
             ${full.books.length ? `<div>Bought: ${esc(full.books.map(b => b.name).join(', '))}</div>` : ''}
-            ${last ? `<div>${full.calls.length} earlier call${full.calls.length === 1 ? '' : 's'}:</div><ul>${last}</ul>` : '<div>No earlier calls.</div>'}</div>`;
+            ${full.other ? '<div>With another team member. Logging this call makes them yours too.</div>' : last ? `<div>${full.calls.length} earlier call${full.calls.length === 1 ? '' : 's'}:</div><ul>${last}</ul>` : '<div>No earlier calls.</div>'}</div>`;
         } catch { box.innerHTML = ''; }
       }, 350);
       $('#k-phone').addEventListener('input', who);

@@ -56,6 +56,13 @@ const SORTS = {
   name: 'lower(name), id', newest: 'id DESC',
 };
 const NOT_SINCE = { 3: '3 months', 6: '6 months', 12: '12 months' };
+
+// "Own only" customers (Roles & access, Tele-sales): people they sold to, called, or put in a follow-up list they made.
+// Uses the named parameter @own_me (the person's user id). No '?' here: the database helper reads every '?' as a parameter.
+const OWN = `(EXISTS (SELECT 1 FROM sales os WHERE os.customer_id = c.id AND (os.salesperson_id = @own_me OR os.created_by = @own_me))
+  OR EXISTS (SELECT 1 FROM calls oc WHERE oc.customer_id = c.id AND oc.salesperson_id = @own_me)
+  OR EXISTS (SELECT 1 FROM follow_up_members om JOIN follow_up_lists ol ON ol.id = om.list_id WHERE om.customer_id = c.id AND ol.created_by = @own_me))`;
+const NOT_YOURS = 'This customer is with another team member. Find them by their full number to log a call or take an order.';
 const REASONS = ['Name to check', 'Name in Malayalam', 'PIN missing', 'PIN wrong', 'Address missing', 'No order'];
 
 /**
@@ -123,7 +130,16 @@ async function findOrCreateCustomer(t, { name, phone, address, location, state, 
   return { id: r.id, created: true };
 }
 
-module.exports = (app, { db, perm, requireAdmin }) => {
+module.exports = (app, { db, perm, requireAdmin, access }) => {
+  /** The person's user id when they see only their own customers, else null. */
+  const ownId = async user => (access && await access.isOwn(user, 'customers') ? user.id : null);
+  /** Throws 403 when an "own only" person asks for a customer who is not theirs. */
+  async function assertOwnCustomer(user, customerId) {
+    const me = await ownId(user);
+    if (me && !(await db.get(`SELECT 1 AS x FROM customers c WHERE c.id = @id AND ${OWN}`, { id: customerId, own_me: me }))) {
+      const { HttpError } = require('../util'); throw new HttpError(403, NOT_YOURS);
+    }
+  }
   // "Has bought X": the customer owns the book, either bought on its own or inside a set. For a set, they own
   // every book in it (so a KVS Combo buyer counts as having bought KVS1 and KVS2). Cancelled orders do not count.
   const OWNS = bookExpr => `EXISTS (SELECT 1 FROM sales s JOIN sale_items i ON i.sale_id = s.id LEFT JOIN pack_items pk ON pk.pack_id = i.book_id
@@ -141,8 +157,9 @@ module.exports = (app, { db, perm, requireAdmin }) => {
     const steps = nb.steps.map(([a, b]) => ({ key: `${a}>${b}`, from: ids.get(a.toLowerCase()), to: ids.get(b.toLowerCase()) })).filter(s => s.from && s.to);
     return [await getCharges(db), await getLists(db), { months: nb.months, steps }];
   }
-  function customerQuery(q, charges, lists, next = { months: 1, steps: [] }) {
+  function customerQuery(q, charges, lists, next = { months: 1, steps: [] }, own = null) {
     const where = []; const p = {};
+    if (own) { where.push(OWN); p.own_me = own; }
     if (q.source) { where.push('c.source = @source'); p.source = oneOf(q.source, SOURCES, { name: 'Added from' }); }
     // Bulk order customers: at least one order with many copies, or of a large amount (both set on the Settings page).
     if (q.bulk === '1') {
@@ -196,10 +213,20 @@ module.exports = (app, { db, perm, requireAdmin }) => {
   }
 
   app.get('/api/customers', perm('customers'), async (req, res) => {
-    const { sql, p } = customerQuery(req.query, ...(await queryArgs()));
+    const own = await ownId(req.user);
+    const { sql, p } = customerQuery(req.query, ...(await queryArgs()), own);
     const rows = await db.all(`${sql} LIMIT 501`, p);
     const { n } = await db.get(`SELECT COUNT(*) AS n FROM (${sql}) y`, p);
-    res.json({ rows: rows.slice(0, 500), truncated: rows.length > 500, total: n });
+    // Own only: a full number typed in Search also finds a customer who is with someone else (the basics only).
+    let found = [];
+    const key = phoneKey(req.query.q || '');
+    if (own && key.length >= 10) {
+      found = await db.all(`SELECT c.id, c.code, c.name, c.phone, c.location, c.kind,
+          (SELECT MAX(s.sale_date) FROM sales s WHERE s.customer_id = c.id AND s.status <> 'Cancelled') AS last_purchase_date,
+          (SELECT u.name FROM sales s JOIN users u ON u.id = s.salesperson_id WHERE s.customer_id = c.id AND s.status <> 'Cancelled' ORDER BY s.sale_date DESC, s.id DESC LIMIT 1) AS last_with
+        FROM customers c WHERE (c.phone_norm = @key OR c.phone2_norm = @key) AND NOT ${OWN}`, { key, own_me: own });
+    }
+    res.json({ rows: rows.slice(0, 500), truncated: rows.length > 500, total: n, own: !!own, found });
   });
 
   // The filtered customers as a file that Google Contacts can import (contacts.google.com → Import).
@@ -235,20 +262,23 @@ module.exports = (app, { db, perm, requireAdmin }) => {
   });
 
   // What the "Update needed" tab shows besides the list: counts by reason, and the sales that have no customer record.
-  app.get('/api/customers/update-summary', perm('customers'), async (_req, res) => {
+  app.get('/api/customers/update-summary', perm('customers'), async (req, res) => {
     const lists = await getLists(db);
-    const counts = await db.all(`SELECT r AS reason, COUNT(*) AS n FROM customers c, unnest(${needsSql(lists.places)}) r GROUP BY r`);
-    const { n } = await db.get(`SELECT COUNT(*) AS n FROM customers c WHERE cardinality(${needsSql(lists.places)}) > 0`);
-    const total = await db.get(`SELECT COUNT(*) AS n FROM customers c WHERE c.kind = 'Customer'`);
+    const own = await ownId(req.user); const p = { own_me: own };
+    const mine = own ? `AND ${OWN}` : ''; const mineS = own ? 'AND (s.salesperson_id = @own_me OR s.created_by = @own_me)' : '';
+    const counts = await db.all(`SELECT r AS reason, COUNT(*) AS n FROM customers c, unnest(${needsSql(lists.places)}) r WHERE TRUE ${mine} GROUP BY r`, p);
+    const { n } = await db.get(`SELECT COUNT(*) AS n FROM customers c WHERE cardinality(${needsSql(lists.places)}) > 0 ${mine}`, p);
+    const total = await db.get(`SELECT COUNT(*) AS n FROM customers c WHERE c.kind = 'Customer' ${mine}`, p);
     const noCustomer = await db.all(`SELECT s.id, s.sale_no, s.sale_date, s.channel, s.platform, s.customer_name, s.address, s.total_amount, s.status,
         CASE WHEN s.import_ref LIKE 'WEB-%' THEN 'Website' WHEN s.import_ref LIKE 'WA-%' THEN 'WhatsApp group' WHEN s.import_ref IS NOT NULL THEN 'Order sheet' ELSE 'Sales' END AS source
-      FROM sales s WHERE s.customer_id IS NULL AND s.status <> 'Cancelled' AND s.channel <> 'Onsite' ORDER BY s.sale_date DESC, s.id DESC LIMIT 500`);
-    const { m } = await db.get(`SELECT COUNT(*) AS m FROM sales s WHERE s.customer_id IS NULL AND s.status <> 'Cancelled' AND s.channel <> 'Onsite'`);
+      FROM sales s WHERE s.customer_id IS NULL AND s.status <> 'Cancelled' AND s.channel <> 'Onsite' ${mineS} ORDER BY s.sale_date DESC, s.id DESC LIMIT 500`, p);
+    const { m } = await db.get(`SELECT COUNT(*) AS m FROM sales s WHERE s.customer_id IS NULL AND s.status <> 'Cancelled' AND s.channel <> 'Onsite' ${mineS}`, p);
     res.json({ feedback: (await db.get('SELECT COUNT(*) AS n FROM feedback WHERE submitted_at IS NOT NULL')).n, needing: n, complete: total.n - n, reasons: Object.fromEntries(REASONS.map(r => [r, (counts.find(c => c.reason === r) || {}).n || 0])), sales_without_customer: m, sales: noCustomer });
   });
 
   // Possibly the same person twice: same name (letters only) and the same PIN. Pairs marked "not the same person" are left out.
-  app.get('/api/customers/duplicates', perm('customers'), async (_req, res) => {
+  app.get('/api/customers/duplicates', perm('customers'), async (req, res) => {
+    if (await ownId(req.user)) return res.json([]); // merging is the Admin's; an own-only list has no use for it
     const dismissed = new Set((await read(db, 'duplicates_dismissed')) || []);
     const groups = (await db.all(`SELECT array_agg(id ORDER BY id) AS ids FROM (
         SELECT c.id, lower(regexp_replace(c.name, '[^A-Za-z]', '', 'g')) AS nk, c.pin FROM customers c WHERE c.kind = 'Customer' AND c.pin ~ '^[1-9][0-9]{5}$') k
@@ -276,10 +306,10 @@ module.exports = (app, { db, perm, requireAdmin }) => {
   });
 
   // Customers → Next book: how many customers are ready for each step.
-  app.get('/api/customers/next-book', perm('customers'), async (_req, res) => {
-    const args = await queryArgs(); const out = [];
+  app.get('/api/customers/next-book', perm('customers'), async (req, res) => {
+    const args = await queryArgs(); const out = []; const own = await ownId(req.user);
     for (const s of args[2].steps) {
-      const { sql, p } = customerQuery({ ready_for: s.key }, ...args);
+      const { sql, p } = customerQuery({ ready_for: s.key }, ...args, own);
       out.push({ key: s.key, from: { id: s.from.id, name: s.from.name }, to: { id: s.to.id, name: s.to.name }, ready: (await db.get(`SELECT COUNT(*) AS n FROM (${sql}) y`, p)).n });
     }
     res.json({ months: args[2].months, steps: out });
@@ -289,6 +319,7 @@ module.exports = (app, { db, perm, requireAdmin }) => {
   app.get('/api/customers/:id', perm('customers'), async (req, res) => {
     const c = await db.get(`SELECT c.*, ${STATS}, ${needsSql((await getLists(db)).places)} AS needs FROM customers c WHERE c.id = ?`, [idParam(req.params.id)]);
     if (!c) throw notFound('Customer');
+    await assertOwnCustomer(req.user, c.id);
     const sales = await db.all(`SELECT s.id, s.sale_no, s.sale_date, s.channel, s.status, s.total_amount, s.amount_received,
         (s.total_amount - s.amount_received) AS balance, s.payment_status, s.due_date, u.name AS salesperson_name
       FROM sales s JOIN users u ON u.id = s.salesperson_id WHERE s.customer_id = ? ORDER BY s.sale_date DESC, s.id DESC`, [c.id]);
@@ -316,6 +347,7 @@ module.exports = (app, { db, perm, requireAdmin }) => {
   app.patch('/api/customers/:id', perm('customers'), async (req, res) => {
     const before = await db.get('SELECT id, name, phone, phone_norm, phone2, phone2_norm, address, location, state, pin, type, contact_person, name_ok FROM customers WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Customer');
+    await assertOwnCustomer(req.user, before.id);
     const b = req.body; const next = { ...before };
     if (b.name !== undefined) next.name = str(b.name, { required: true, name: 'Customer name', max: 150 });
     const lists = await getLists(db);
@@ -351,7 +383,7 @@ module.exports = (app, { db, perm, requireAdmin }) => {
     res.json(await db.get(`SELECT c.*, ${STATS} FROM customers c WHERE c.id = ?`, [before.id]));
   });
 
-  require('./followups')(app, { db, perm, customerQuery, queryArgs });
+  require('./followups')(app, { db, perm, customerQuery, queryArgs, ownId, assertOwnCustomer });
 };
 module.exports.findOrCreateCustomer = findOrCreateCustomer;
 module.exports.SORTS = SORTS;

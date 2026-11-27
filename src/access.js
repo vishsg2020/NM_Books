@@ -44,6 +44,22 @@ const DEFAULTS = {
 };
 const EDITABLE = ['manager', 'telesales', 'online', 'onsite', 'dispatch', 'viewer'];
 
+// "Whose records" (27 Nov 2026): for Tele-sales, Sales and Customers can be Own only or the Whole channel.
+//   Own sales: orders where they are the sales person or that they entered.
+//   Own customers: people they sold to, called, or put in a follow-up list they made.
+// Saved in settings key 'role_scopes'. Other roles keep the fixed rules above.
+const SCOPES = ['own', 'all'];
+const SCOPED = [{ role: 'telesales', area: 'sales' }, { role: 'telesales', area: 'customers' }];
+const SCOPE_DEFAULTS = { telesales: { sales: 'own', customers: 'own' } };
+function normalizeScopes(s) {
+  const out = {};
+  for (const { role, area } of SCOPED) {
+    const v = s && s[role] && s[role][area];
+    (out[role] = out[role] || {})[area] = SCOPES.includes(v) ? v : SCOPE_DEFAULTS[role][area];
+  }
+  return out;
+}
+
 function normalize(grid) {
   const out = {};
   for (const r of EDITABLE) {
@@ -66,8 +82,27 @@ function createAccess(db) {
     cache = normalize(await read(db, 'role_access')); at = Date.now();
     return cache;
   }
-  async function saved() { return !!(await db.get(`SELECT 1 FROM settings WHERE key = 'role_access'`)); }
-  async function save(t, next) { await write(t, 'role_access', next); cache = null; }
+  let scache = null; let sat = 0;
+  async function scopes() {
+    if (scache && Date.now() - sat < 5000) return scache;
+    scache = normalizeScopes(await read(db, 'role_scopes')); sat = Date.now();
+    return scache;
+  }
+  async function saved() { return !!(await db.get(`SELECT 1 FROM settings WHERE key IN ('role_access', 'role_scopes')`)); }
+  async function save(t, next, nextScopes) {
+    await write(t, 'role_access', next); cache = null;
+    if (nextScopes) { await write(t, 'role_scopes', nextScopes); scache = null; }
+  }
+  /** Is this person limited to their own records in this area (sales, customers)? */
+  async function isOwn(user, area) {
+    if (!user || !SCOPED.some(x => x.role === user.role && x.area === area)) return false;
+    return (await scopes())[user.role][area] === 'own';
+  }
+  /** For the browser: the areas where this person sees only their own records. */
+  async function ownFor(role) {
+    const s = await scopes();
+    return Object.fromEntries(SCOPED.filter(x => x.role === role).map(x => [x.area, s[role][x.area] === 'own']));
+  }
   async function permsFor(role) {
     if (role === 'admin') return Object.fromEntries(AREAS.map(a => [a.key, 'edit']));
     const g = await grid();
@@ -117,7 +152,16 @@ function createAccess(db) {
     }
     return normalize(body);
   }
-  return { grid, saved, save, permsFor, perm, requireAdmin, requireWide, parseGrid };
+  function parseScopes(body) {
+    if (body === undefined || body === null) return null;
+    if (typeof body !== 'object' || Array.isArray(body)) throw bad('Send the own-only choices');
+    for (const r of Object.keys(body)) for (const [a, v] of Object.entries(body[r] || {})) {
+      if (!SCOPED.some(x => x.role === r && x.area === a)) throw bad(`Own only cannot be set for ${ROLE_NAMES[r] || r} · ${a}`);
+      if (!SCOPES.includes(v)) throw bad('Choose Own only or Whole channel');
+    }
+    return normalizeScopes(body);
+  }
+  return { grid, scopes, saved, save, permsFor, perm, requireAdmin, requireWide, parseGrid, parseScopes, isOwn, ownFor };
 }
 
-module.exports = { ROLES, ROLE_NAMES, WIDE, LEVELS, AREAS, DEFAULTS, EDITABLE, normalize, defaults, isWide, createAccess };
+module.exports = { ROLES, ROLE_NAMES, WIDE, LEVELS, AREAS, DEFAULTS, EDITABLE, SCOPED, SCOPE_DEFAULTS, normalize, normalizeScopes, defaults, isWide, createAccess };

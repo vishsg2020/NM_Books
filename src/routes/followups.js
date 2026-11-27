@@ -39,13 +39,19 @@ async function markOrders(db, listId) {
 }
 const newToken = () => crypto.randomBytes(18).toString('base64url'); // 24 characters, not guessable
 
-module.exports = (app, { db, perm, customerQuery, queryArgs }) => {
+module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () => null, assertOwnCustomer = async () => {} }) => {
+  // "Own only" (Tele-sales): a person sees and works the lists they made.
+  async function assertOwnList(user, list) {
+    const me = await ownId(user);
+    if (me && list.created_by !== me) { const { HttpError } = require('../util'); throw new HttpError(403, 'This list belongs to another team member'); }
+  }
   // ── Follow-up lists ──────────────────────────────────────────────────────
-  app.get('/api/followups', perm('customers'), async (_req, res) => {
+  app.get('/api/followups', perm('customers'), async (req, res) => {
     await markOrders(db);
+    const me = await ownId(req.user);
     const lists = await db.all(`SELECT l.id, l.name, l.note, l.created_at, l.closed_at, u.name AS created_by_name,
         (SELECT COUNT(*) FROM follow_up_members m WHERE m.list_id = l.id) AS total
-      FROM follow_up_lists l JOIN users u ON u.id = l.created_by ORDER BY (l.closed_at IS NULL) DESC, l.id DESC LIMIT 200`);
+      FROM follow_up_lists l JOIN users u ON u.id = l.created_by ${me ? 'WHERE l.created_by = @me' : ''} ORDER BY (l.closed_at IS NULL) DESC, l.id DESC LIMIT 200`, { me });
     const counts = await db.all('SELECT list_id, status, COUNT(*) AS n FROM follow_up_members GROUP BY list_id, status');
     for (const l of lists) l.counts = Object.fromEntries(counts.filter(c => c.list_id === l.id).map(c => [c.status, c.n]));
     res.json({ lists, statuses: STATUSES });
@@ -56,7 +62,7 @@ module.exports = (app, { db, perm, customerQuery, queryArgs }) => {
     const note = str(req.body.note, { name: 'Note for the team', max: 500 }) || null;
     const raw = req.body.filters && typeof req.body.filters === 'object' ? req.body.filters : {};
     const filters = Object.fromEntries(FILTER_KEYS.filter(k => raw[k] !== undefined && raw[k] !== '').map(k => [k, String(raw[k])]));
-    const { sql, p } = customerQuery(filters, ...(await queryArgs()));
+    const { sql, p } = customerQuery(filters, ...(await queryArgs()), await ownId(req.user));
     const { n } = await db.get(`SELECT COUNT(*) AS n FROM (${sql}) y`, p);
     if (!n) throw bad('No customers match these filters');
     if (n > MAX_MEMBERS) throw bad(`${n.toLocaleString('en-IN')} customers match. A list can hold up to ${MAX_MEMBERS.toLocaleString('en-IN')}: add a filter to narrow it down.`);
@@ -74,6 +80,7 @@ module.exports = (app, { db, perm, customerQuery, queryArgs }) => {
     const list = await db.get(`SELECT l.*, u.name AS created_by_name, cu.name AS closed_by_name FROM follow_up_lists l
       JOIN users u ON u.id = l.created_by LEFT JOIN users cu ON cu.id = l.closed_by WHERE l.id = ?`, [id]);
     if (!list) throw notFound('Follow-up list');
+    await assertOwnList(req.user, list);
     if (!list.closed_at) await markOrders(db, id);
     const members = await db.all(`SELECT c.id, c.code, c.name, c.phone, c.location, c.type, m.status, m.status_at, su.name AS status_by_name,
         m.sale_id, s.sale_no, s.sale_date, s.total_amount AS sale_amount,
@@ -98,8 +105,9 @@ module.exports = (app, { db, perm, customerQuery, queryArgs }) => {
   app.patch('/api/followups/:id/members/:cid', perm('customers'), async (req, res) => {
     const id = idParam(req.params.id); const cid = idParam(req.params.cid);
     const status = oneOf(req.body.status, STATUSES, { required: true, name: 'Status' });
-    const m = await db.get(`SELECT m.status, l.closed_at FROM follow_up_members m JOIN follow_up_lists l ON l.id = m.list_id WHERE m.list_id = ? AND m.customer_id = ?`, [id, cid]);
+    const m = await db.get(`SELECT m.status, l.closed_at, l.created_by FROM follow_up_members m JOIN follow_up_lists l ON l.id = m.list_id WHERE m.list_id = ? AND m.customer_id = ?`, [id, cid]);
     if (!m) throw notFound('Customer in this list');
+    await assertOwnList(req.user, m);
     if (m.closed_at) throw conflict('This list is closed. Reopen it to change a status.');
     await db.tx(async t => {
       await t.run('UPDATE follow_up_members SET status = ?, status_at = now_iso(), status_by = ? WHERE list_id = ? AND customer_id = ?', [status, req.user.id, id, cid]);
@@ -111,8 +119,9 @@ module.exports = (app, { db, perm, customerQuery, queryArgs }) => {
   for (const [action, closed] of [['close', true], ['reopen', false]]) {
     app.post(`/api/followups/:id/${action}`, perm('customers'), async (req, res) => {
       const id = idParam(req.params.id);
-      const l = await db.get('SELECT id, closed_at FROM follow_up_lists WHERE id = ?', [id]);
+      const l = await db.get('SELECT id, closed_at, created_by FROM follow_up_lists WHERE id = ?', [id]);
       if (!l) throw notFound('Follow-up list');
+      await assertOwnList(req.user, l);
       await db.tx(async t => {
         await t.run(`UPDATE follow_up_lists SET closed_at = ${closed ? 'now_iso()' : 'NULL'}, closed_by = ? WHERE id = ?`, [closed ? req.user.id : null, id]);
         await audit(t, req.user, 'followup_list', id, closed ? 'closed' : 'reopened');
@@ -149,6 +158,7 @@ module.exports = (app, { db, perm, customerQuery, queryArgs }) => {
     const bookId = req.body.book_id ? idParam(req.body.book_id) : null;
     const saleId = req.body.sale_id ? idParam(req.body.sale_id) : null;
     if (!(await db.get('SELECT 1 FROM customers WHERE id = ?', [cid]))) throw notFound('Customer');
+    await assertOwnCustomer(req.user, cid);
     if (saleId && !(await db.get('SELECT 1 FROM sales WHERE id = ? AND customer_id = ?', [saleId, cid]))) throw bad('That order is not this customer\'s');
     await db.tx(async t => {
       await t.run('INSERT INTO customer_messages (customer_id, kind, list_id, book_id, sale_id, user_id) VALUES (?,?,?,?,?,?)', [cid, kind, listId, bookId, saleId, req.user.id]);
