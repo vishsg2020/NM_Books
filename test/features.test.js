@@ -436,3 +436,37 @@ test('own only (Tele-sales): their own orders and customers; a full number finds
   assert.equal((await A.get('/api/users/old-names')).data.length, 0);
   assert.equal((await A.get('/api/users')).data.find(u => u.id === tid).old_names, 'Megha');
 });
+
+test('follow-up lists: Admin or Manager assigns a list to several people; they work it but cannot close it', async () => {
+  const T2 = client(); await T2.login('t2@x.in');
+  const sale = ok(await T2.post('/api/sales', { customer_name: 'Assigned Customer', customer_phone: '9811111201', address: 'House 5, River Road', state: 'Kerala', location: 'Wayanad', pin: '673121', items: [{ book_id: maam.id, qty: 1 }] }));
+  const list = ok(await M.post('/api/followups', { name: 'Wayanad call list', filters: { q: '9811111201' } }));
+  assert.ok(!(await T.get('/api/followups')).data.lists.some(l => l.id === list.id));
+  assert.equal((await T.get(`/api/followups/${list.id}`)).status, 403);
+  // who can assign, and to whom
+  assert.equal((await T.get('/api/followups/people')).status, 403);
+  assert.equal((await T.send('PUT', `/api/followups/${list.id}/assignees`, { user_ids: [] })).status, 403);
+  const people = ok(await M.get('/api/followups/people'), 200);
+  const users = (await A.get('/api/users')).data; const idOf = e => users.find(u => u.email === e).id;
+  assert.ok(people.some(p => p.id === idOf('t@x.in')) && people.some(p => p.id === idOf('m@x.in')) && !people.some(p => p.id === idOf('d@x.in')));
+  assert.equal((await M.send('PUT', `/api/followups/${list.id}/assignees`, { user_ids: [idOf('d@x.in')] })).status, 400);
+  const as = ok(await M.send('PUT', `/api/followups/${list.id}/assignees`, { user_ids: [idOf('t@x.in'), idOf('s@x.in')] }), 200);
+  assert.deepEqual(as.assignees.map(a => a.name).sort(), ['onsite user', 'telesales user']);
+  const log = await db.get(`SELECT after_json FROM audit_events WHERE entity = 'followup_list' AND entity_id = ? AND action = 'assigned' ORDER BY id DESC LIMIT 1`, [list.id]);
+  assert.deepEqual(JSON.parse(log.after_json).assigned_to, ['onsite user', 'telesales user']);
+  // the assigned Tele-sales person (Own only): the list is theirs to work, its customers are not added to their Customers
+  const mine = (await T.get('/api/followups')).data.lists.find(l => l.id === list.id);
+  assert.ok(mine.assigned_to_me); assert.equal(mine.assigned_by_name, 'manager user'); assert.equal(mine.can_manage, false);
+  const d = ok(await T.get(`/api/followups/${list.id}`), 200);
+  assert.equal(d.members[0].yours, false); assert.equal(d.can_assign, false); assert.equal(d.can_manage, false);
+  ok(await T.patch(`/api/followups/${list.id}/members/${sale.customer_id}`, { status: 'No answer' }), 200);
+  ok(await T.post(`/api/customers/${sale.customer_id}/messages`, { kind: 'feedback', list_id: list.id }));
+  assert.equal((await T.post(`/api/customers/${sale.customer_id}/messages`, { kind: 'feedback' })).status, 403);
+  assert.ok(!(await T.get('/api/customers?kind=all')).data.rows.some(c => c.id === sale.customer_id));
+  assert.equal((await T.post(`/api/followups/${list.id}/close`)).status, 403);
+  // the Manager closes and reopens it; the Admin can change who works it
+  ok(await M.post(`/api/followups/${list.id}/close`), 200); ok(await M.post(`/api/followups/${list.id}/reopen`), 200);
+  ok(await A.send('PUT', `/api/followups/${list.id}/assignees`, { user_ids: [] }), 200);
+  assert.equal((await T.get(`/api/followups/${list.id}`)).status, 403);
+  assert.deepEqual((await M.get('/api/followups')).data.lists.find(l => l.id === list.id).assignees, []);
+});

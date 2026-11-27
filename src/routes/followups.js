@@ -39,22 +39,43 @@ async function markOrders(db, listId) {
 }
 const newToken = () => crypto.randomBytes(18).toString('base64url'); // 24 characters, not guessable
 
-module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () => null, assertOwnCustomer = async () => {} }) => {
-  // "Own only" (Tele-sales): a person sees and works the lists they made.
+module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () => null, assertOwnCustomer = async () => {}, OWN = 'TRUE' }) => {
+  const { HttpError } = require('../util');
+  const ASSIGNABLE = ['telesales', 'online', 'onsite', 'manager'];
+  const canAssign = user => user.role === 'admin' || user.role === 'manager';
+  const isAssigned = async (listId, userId) => !!(await db.get('SELECT 1 AS x FROM follow_up_assignees WHERE list_id = ? AND user_id = ?', [listId, userId]));
+  // "Own only" (Tele-sales): a person sees and works the lists they made or were assigned.
   async function assertOwnList(user, list) {
     const me = await ownId(user);
-    if (me && list.created_by !== me) { const { HttpError } = require('../util'); throw new HttpError(403, 'This list belongs to another team member'); }
+    if (me && list.created_by !== me && !(await isAssigned(list.id || list.list_id, me))) throw new HttpError(403, 'This list belongs to another team member');
   }
+  // Assigning, closing and reopening: Admin, Manager or whoever made the list.
+  function assertCanManage(user, list, what) {
+    if (!canAssign(user) && list.created_by !== user.id) throw new HttpError(403, `Only the Admin, a Manager or whoever made the list can ${what} it`);
+  }
+  const assigneesOf = ids => (ids.length ? db.all(`SELECT a.list_id, a.user_id AS id, u.name, u.role, u.active, a.assigned_at, ab.name AS assigned_by_name
+      FROM follow_up_assignees a JOIN users u ON u.id = a.user_id JOIN users ab ON ab.id = a.assigned_by
+      WHERE a.list_id = ANY(@ids::int[]) ORDER BY u.name`, { ids }) : []);
   // ── Follow-up lists ──────────────────────────────────────────────────────
   app.get('/api/followups', perm('customers'), async (req, res) => {
     await markOrders(db);
     const me = await ownId(req.user);
-    const lists = await db.all(`SELECT l.id, l.name, l.note, l.created_at, l.closed_at, u.name AS created_by_name,
+    const lists = await db.all(`SELECT l.id, l.name, l.note, l.created_at, l.closed_at, l.created_by, u.name AS created_by_name,
         (SELECT COUNT(*) FROM follow_up_members m WHERE m.list_id = l.id) AS total
-      FROM follow_up_lists l JOIN users u ON u.id = l.created_by ${me ? 'WHERE l.created_by = @me' : ''} ORDER BY (l.closed_at IS NULL) DESC, l.id DESC LIMIT 200`, { me });
+      FROM follow_up_lists l JOIN users u ON u.id = l.created_by
+      ${me ? 'WHERE l.created_by = @me OR EXISTS (SELECT 1 FROM follow_up_assignees a WHERE a.list_id = l.id AND a.user_id = @me)' : ''}
+      ORDER BY (l.closed_at IS NULL) DESC, l.id DESC LIMIT 200`, { me });
     const counts = await db.all('SELECT list_id, status, COUNT(*) AS n FROM follow_up_members GROUP BY list_id, status');
-    for (const l of lists) l.counts = Object.fromEntries(counts.filter(c => c.list_id === l.id).map(c => [c.status, c.n]));
-    res.json({ lists, statuses: STATUSES });
+    const assignees = await assigneesOf(lists.map(l => l.id));
+    for (const l of lists) {
+      l.counts = Object.fromEntries(counts.filter(c => c.list_id === l.id).map(c => [c.status, c.n]));
+      l.assignees = assignees.filter(a => a.list_id === l.id).map(({ list_id, ...a }) => a);
+      const mine = l.assignees.find(a => a.id === req.user.id);
+      l.assigned_to_me = !!mine;
+      if (mine) { l.assigned_by_name = mine.assigned_by_name; l.assigned_at = mine.assigned_at; }
+      l.can_manage = canAssign(req.user) || l.created_by === req.user.id;
+    }
+    res.json({ lists, statuses: STATUSES, can_assign: canAssign(req.user) });
   });
 
   app.post('/api/followups', perm('customers'), async (req, res) => {
@@ -75,6 +96,10 @@ module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () =>
     res.status(201).json({ id, total: n });
   });
 
+  app.get('/api/followups/people', perm('customers'), async (req, res) => {
+    if (!canAssign(req.user)) throw new HttpError(403, 'Only the Admin or a Manager can assign lists');
+    res.json(await db.all(`SELECT id, name, role FROM users WHERE active = 1 AND role = ANY(@roles::text[]) ORDER BY role, name`, { roles: ASSIGNABLE }));
+  });
   app.get('/api/followups/:id', perm('customers'), async (req, res) => {
     const id = idParam(req.params.id);
     const list = await db.get(`SELECT l.*, u.name AS created_by_name, cu.name AS closed_by_name FROM follow_up_lists l
@@ -82,7 +107,10 @@ module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () =>
     if (!list) throw notFound('Follow-up list');
     await assertOwnList(req.user, list);
     if (!list.closed_at) await markOrders(db, id);
+    // Own only: a customer of someone else in an assigned list can be worked here, but their page stays closed.
+    const me = await ownId(req.user);
     const members = await db.all(`SELECT c.id, c.code, c.name, c.phone, c.location, c.type, m.status, m.status_at, su.name AS status_by_name,
+        ${me ? OWN : 'TRUE'} AS yours,
         m.sale_id, s.sale_no, s.sale_date, s.total_amount AS sale_amount,
         lm.kind AS msg_kind, lm.created_at AS msg_at, lm.user_name AS msg_by, lc.called_at, lc.status AS call_status, lc.user_name AS call_by,
         fb.stars, fb.comment
@@ -90,7 +118,7 @@ module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () =>
       LEFT JOIN LATERAL (SELECT x.kind, x.created_at, u.name AS user_name FROM customer_messages x JOIN users u ON u.id = x.user_id WHERE x.customer_id = c.id ORDER BY x.id DESC LIMIT 1) lm ON true
       LEFT JOIN LATERAL (SELECT k.called_at, k.status, u.name AS user_name FROM calls k JOIN users u ON u.id = k.salesperson_id WHERE k.customer_id = c.id ORDER BY k.called_at DESC, k.id DESC LIMIT 1) lc ON true
       LEFT JOIN LATERAL (SELECT f.stars, f.comment FROM feedback f WHERE f.customer_id = c.id AND f.submitted_at IS NOT NULL ORDER BY f.submitted_at DESC LIMIT 1) fb ON true
-      WHERE m.list_id = ? ORDER BY c.name, c.id`, [id]);
+      WHERE m.list_id = @id ORDER BY c.name, c.id`, { id, own_me: me });
     const kindName = Object.fromEntries(MESSAGE_KINDS.map(([k, l]) => [k, l]));
     for (const m of members) {
       const msg = m.msg_at ? { at: ist(m.msg_at), how: `WhatsApp: ${kindName[m.msg_kind] || m.msg_kind}`, by: m.msg_by } : null;
@@ -99,13 +127,35 @@ module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () =>
       for (const k of ['msg_kind', 'msg_at', 'msg_by', 'called_at', 'call_status', 'call_by']) delete m[k];
     }
     const counts = {}; for (const m of members) counts[m.status] = (counts[m.status] || 0) + 1;
-    res.json({ ...list, filters: parse(list.filters_json), filters_json: undefined, members, counts, statuses: STATUSES });
+    const assignees = (await assigneesOf([id])).map(({ list_id, ...a }) => a);
+    res.json({ ...list, filters: parse(list.filters_json), filters_json: undefined, members, counts, statuses: STATUSES,
+      assignees, can_assign: canAssign(req.user), can_manage: canAssign(req.user) || list.created_by === req.user.id });
+  });
+
+  // ── Assigning a list (Admin, Manager) ────────────────────────────────────
+  app.put('/api/followups/:id/assignees', perm('customers'), async (req, res) => {
+    if (!canAssign(req.user)) throw new HttpError(403, 'Only the Admin or a Manager can assign lists');
+    const id = idParam(req.params.id);
+    const list = await db.get('SELECT id, name FROM follow_up_lists WHERE id = ?', [id]);
+    if (!list) throw notFound('Follow-up list');
+    const raw = req.body && req.body.user_ids;
+    if (!Array.isArray(raw) || raw.length > 50) throw bad('Choose the people to assign');
+    const ids = [...new Set(raw.map(x => idParam(x)))];
+    const people = ids.length ? await db.all(`SELECT id, name FROM users WHERE id = ANY(@ids::int[]) AND active = 1 AND role = ANY(@roles::text[])`, { ids, roles: ASSIGNABLE }) : [];
+    if (people.length !== ids.length) throw bad('Lists can be assigned to active Tele-sales, Online, Onsite and Manager logins only', { field: 'Assigned to' });
+    const before = await assigneesOf([id]);
+    await db.tx(async t => {
+      await t.run('DELETE FROM follow_up_assignees WHERE list_id = @id AND NOT (user_id = ANY(@ids::int[]))', { id, ids });
+      for (const p of people) await t.run('INSERT INTO follow_up_assignees (list_id, user_id, assigned_by) VALUES (?,?,?) ON CONFLICT DO NOTHING', [id, p.id, req.user.id]);
+      await audit(t, req.user, 'followup_list', id, 'assigned', { assigned_to: before.map(a => a.name) }, { assigned_to: people.map(p => p.name).sort() });
+    });
+    res.json({ ok: true, assignees: (await assigneesOf([id])).map(({ list_id, ...a }) => a) });
   });
 
   app.patch('/api/followups/:id/members/:cid', perm('customers'), async (req, res) => {
     const id = idParam(req.params.id); const cid = idParam(req.params.cid);
     const status = oneOf(req.body.status, STATUSES, { required: true, name: 'Status' });
-    const m = await db.get(`SELECT m.status, l.closed_at, l.created_by FROM follow_up_members m JOIN follow_up_lists l ON l.id = m.list_id WHERE m.list_id = ? AND m.customer_id = ?`, [id, cid]);
+    const m = await db.get(`SELECT m.status, m.list_id, l.closed_at, l.created_by FROM follow_up_members m JOIN follow_up_lists l ON l.id = m.list_id WHERE m.list_id = ? AND m.customer_id = ?`, [id, cid]);
     if (!m) throw notFound('Customer in this list');
     await assertOwnList(req.user, m);
     if (m.closed_at) throw conflict('This list is closed. Reopen it to change a status.');
@@ -122,6 +172,7 @@ module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () =>
       const l = await db.get('SELECT id, closed_at, created_by FROM follow_up_lists WHERE id = ?', [id]);
       if (!l) throw notFound('Follow-up list');
       await assertOwnList(req.user, l);
+      assertCanManage(req.user, l, action);
       await db.tx(async t => {
         await t.run(`UPDATE follow_up_lists SET closed_at = ${closed ? 'now_iso()' : 'NULL'}, closed_by = ? WHERE id = ?`, [closed ? req.user.id : null, id]);
         await audit(t, req.user, 'followup_list', id, closed ? 'closed' : 'reopened');
@@ -158,7 +209,10 @@ module.exports = (app, { db, perm, customerQuery, queryArgs, ownId = async () =>
     const bookId = req.body.book_id ? idParam(req.body.book_id) : null;
     const saleId = req.body.sale_id ? idParam(req.body.sale_id) : null;
     if (!(await db.get('SELECT 1 FROM customers WHERE id = ?', [cid]))) throw notFound('Customer');
-    await assertOwnCustomer(req.user, cid);
+    // From a list they were assigned: allowed for the customers in that list, theirs or not.
+    const viaList = listId && await db.get(`SELECT 1 AS x FROM follow_up_members m JOIN follow_up_lists l ON l.id = m.list_id
+      WHERE m.list_id = ? AND m.customer_id = ? AND (l.created_by = ? OR EXISTS (SELECT 1 FROM follow_up_assignees a WHERE a.list_id = l.id AND a.user_id = ?))`, [listId, cid, req.user.id, req.user.id]);
+    if (!viaList) await assertOwnCustomer(req.user, cid);
     if (saleId && !(await db.get('SELECT 1 FROM sales WHERE id = ? AND customer_id = ?', [saleId, cid]))) throw bad('That order is not this customer\'s');
     await db.tx(async t => {
       await t.run('INSERT INTO customer_messages (customer_id, kind, list_id, book_id, sale_id, user_id) VALUES (?,?,?,?,?,?)', [cid, kind, listId, bookId, saleId, req.user.id]);

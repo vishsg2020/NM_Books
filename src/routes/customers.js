@@ -383,7 +383,7 @@ module.exports = (app, { db, perm, requireAdmin, access }) => {
     res.json(await db.get(`SELECT c.*, ${STATS} FROM customers c WHERE c.id = ?`, [before.id]));
   });
 
-  require('./followups')(app, { db, perm, customerQuery, queryArgs, ownId, assertOwnCustomer });
+  require('./followups')(app, { db, perm, customerQuery, queryArgs, ownId, assertOwnCustomer, OWN });
 };
 module.exports.findOrCreateCustomer = findOrCreateCustomer;
 module.exports.SORTS = SORTS;
